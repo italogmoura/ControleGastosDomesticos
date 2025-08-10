@@ -30,6 +30,25 @@
     </header>
 
     <main class="container">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Insights</h2>
+          </div>
+          <div class="insights" id="insights">
+            <div class="insight-card">
+              <h3 class="insight-title">Categorias (Despesas)</h3>
+              <canvas id="chart-categorias" height="180"></canvas>
+            </div>
+            <div class="insight-card">
+              <h3 class="insight-title">Top Estabelecimentos</h3>
+              <canvas id="chart-estabelecimentos" height="180"></canvas>
+            </div>
+            <div class="insight-card">
+              <h3 class="insight-title">Locais</h3>
+              <canvas id="chart-locais" height="180"></canvas>
+            </div>
+          </div>
+        </section>
       <section id="dropzone" class="dropzone" tabindex="0" aria-label="Solte aqui seus JSONs">
         <p>Arraste e solte seus arquivos JSON aqui ou use o botão "Selecionar JSON"</p>
       </section>
@@ -65,6 +84,28 @@
           <span id="auto-save-status-2" class="badge" aria-live="polite"></span>
           <span style="color: var(--muted);">Dica: use Exportar/Importar Regras se seu navegador não suportar auto-save.</span>
         </div>
+        <div class="status" style="display:flex; gap:12px; align-items:center; padding: 12px 16px; flex-wrap: wrap;">
+          <strong>Divisão de despesas:</strong>
+          <label style="display:flex; align-items:center; gap:6px;">
+            Usuário
+            <input id="input-perc-usuario" type="number" min="0" max="100" step="1" style="width:80px; background: transparent; color: var(--text); border: 1px solid #334155; border-radius: 6px; padding: 4px;" />
+            <span>%</span>
+          </label>
+          <span style="color: var(--muted);">Esposa: <span id="perc-esposa-live">40</span>%</span>
+          <button id="btn-reset-split" class="btn btn-secondary">Resetar 60/40</button>
+        </div>
+        <div class="status" style="display:flex; gap:12px; align-items:center; padding: 12px 16px; flex-wrap: wrap;">
+          <strong>Calcular por salários (opcional):</strong>
+          <label style="display:flex; align-items:center; gap:6px;">
+            Usuário R$
+            <input id="input-sal-usuario" type="number" min="0" step="0.01" placeholder="0,00" style="width:120px; background: transparent; color: var(--text); border: 1px solid #334155; border-radius: 6px; padding: 4px;" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            Esposa R$
+            <input id="input-sal-esposa" type="number" min="0" step="0.01" placeholder="0,00" style="width:120px; background: transparent; color: var(--text); border: 1px solid #334155; border-radius: 6px; padding: 4px;" />
+          </label>
+          <button id="btn-calcular-salarios" class="btn btn-secondary">Calcular proporção pelos salários</button>
+        </div>
       </section>
 
       <section class="panel">
@@ -78,11 +119,11 @@
             <div class="value" id="sum-exclusivas">R$ 0,00</div>
           </div>
           <div>
-            <div class="label">Usuário (60% do Geral + Exclusivas):</div>
+            <div class="label">Usuário (<span id="label-perc-usuario">60</span>% do Geral + Exclusivas):</div>
             <div class="value" id="sum-usuario">R$ 0,00</div>
           </div>
           <div>
-            <div class="label">Esposa (40% do Geral):</div>
+            <div class="label">Esposa (<span id="label-perc-esposa">40</span>% do Geral):</div>
             <div class="value" id="sum-esposa">R$ 0,00</div>
           </div>
         </div>
@@ -110,6 +151,7 @@
                 <th data-key="valorBRL" class="sortable right">Valor R$</th>
                 <th data-key="valorUSD" class="sortable right">USD</th>
                 <th data-key="cotacao" class="sortable right">Cotação</th>
+                <th class="right">IOF</th>
                 <th data-key="taxas" class="sortable">Taxas</th>
                 <th data-key="parcelamento" class="sortable">Parcelamento</th>
                 <th data-key="observacoes" class="sortable">Observações</th>
@@ -163,6 +205,7 @@
                 <th data-key="valorBRL" class="sortable right">Valor R$</th>
                 <th data-key="valorUSD" class="sortable right">USD</th>
                 <th data-key="cotacao" class="sortable right">Cotação</th>
+                <th class="right">IOF</th>
                 <th data-key="taxas" class="sortable">Taxas</th>
                 <th data-key="parcelamento" class="sortable">Parcelamento</th>
                 <th data-key="observacoes" class="sortable">Observações</th>
@@ -194,8 +237,10 @@
 
   <!-- pdf.js removido: a importação agora é via JSON estruturado -->
 
-    <!-- SheetJS para exportar XLSX -->
+  <!-- SheetJS para exportar XLSX -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- Chart.js para gráficos de insights -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
     <script src="./app.js"></script>
   </body>

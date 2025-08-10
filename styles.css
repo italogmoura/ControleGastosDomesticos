@@ -95,8 +95,15 @@ body {
 
 .cell-divisao select { background: transparent; color: var(--text); border: 1px solid #334155; border-radius: 6px; padding: 4px; }
 
+/* Insights */
+.insights { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 12px 16px 16px; }
+.insight-card { background: #0b1220; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; position: relative; height: 240px; }
+.insight-title { margin: 0 0 8px 0; font-size: 14px; color: var(--muted); }
+.insight-card canvas { width: 100% !important; height: 180px !important; display: block; }
+
 @media (max-width: 920px) {
   .summary { grid-template-columns: repeat(2, 1fr); }
+  .insights { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .summary { grid-template-columns: 1fr; }

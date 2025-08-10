@@ -6,7 +6,8 @@ const LS_KEYS = {
   filters: 'cg_filters_v1',
   rules: 'cg_rules_v1',
   data: 'cg_data_v1',
-  decisions: 'cg_decisions_v1'
+  decisions: 'cg_decisions_v1',
+  split: 'cg_split_v1'
 };
 
 const STATE = {
@@ -15,7 +16,8 @@ const STATE = {
   filters: JSON.parse(localStorage.getItem(LS_KEYS.filters) || 'null') || { banco: '', texto: '', dataInicio: '', dataFim: '', divisao: '' },
   regras: JSON.parse(localStorage.getItem(LS_KEYS.rules) || 'null') || {}, // descricaoNormalizada -> { divisao: 'Geral'|'Exclusiva', score: number }
   decisions: JSON.parse(localStorage.getItem(LS_KEYS.decisions) || 'null') || {}, // id -> { key, divisao }
-  autoSave: { enabled: false, handle: null }
+  autoSave: { enabled: false, handle: null },
+  split: JSON.parse(localStorage.getItem(LS_KEYS.split) || 'null') || { usuario: 60, esposa: 40 }
 };
 
 // Utils
@@ -74,6 +76,7 @@ function savePrefs() {
   localStorage.setItem(LS_KEYS.filters, JSON.stringify(STATE.filters));
   localStorage.setItem(LS_KEYS.rules, JSON.stringify(STATE.regras));
   localStorage.setItem(LS_KEYS.decisions, JSON.stringify(STATE.decisions));
+  localStorage.setItem(LS_KEYS.split, JSON.stringify(STATE.split));
 }
 
 // --- File System Access API helpers (opcional) ---
@@ -260,50 +263,125 @@ function mapJsonToTransactions(json, filename = '') {
   if (!json || typeof json !== 'object') return out;
   const faturas = Array.isArray(json.faturas) ? json.faturas : [];
   for (const f of faturas) {
-    const idf = f.identificacao || {};
-    const banco = idf.banco || 'Desconhecido';
-    const cartao = idf.cartao || '';
-  const mesReferencia = idf.mesReferencia || '';
-    const trans = Array.isArray(f.transacoes) ? f.transacoes : [];
-    for (const t of trans) {
-      const dataISO = t.data || '';
-      const d = dataISO ? new Date(dataISO) : null;
-      const data = d && !isNaN(d) ? fmtDate(d) : '';
-      const descricao = cleanDescricao(t.descricao || '', banco);
-      const local = t.local || '';
-      const categoriaRaw = t.categoria || '';
-      const valorBRLnum = Number(t.valorBRL ?? 0);
-      const valorUSDnum = t.valorUSD == null ? '' : Number(t.valorUSD);
-      const cotacao = t.cotacaoDolar == null ? '' : String(t.cotacaoDolar);
-      const taxas = t.taxas == null ? '' : String(t.taxas);
-      const parcelamento = t.parcelamento || '';
-      const observacoes = t.observacoes || '';
-      const categoriaTipo = categoriaRaw || inferCategoria(descricao);
-      const abs = Math.abs(valorBRLnum || 0);
-      // Mantém o sinal vindo do JSON; se for negativo consideramos pagamento/estorno
-      const isNegative = valorBRLnum < 0;
-      const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipo;
-      const valorAdj = isNegative ? -abs : abs;
-      const id = `${banco}${cartao ? ' '+cartao:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
-      out.push({
-        id,
-        banco: cartao ? `${banco} - ${cartao}` : banco,
-        bancoRaw: banco,
-        cartaoRaw: cartao,
-        mesReferencia: mesReferencia,
-        data,
-        descricao,
-        local,
-        descricaoNormalizada: normalizeDesc(descricao),
-        categoriaTipo: categoriaFinal,
-        divisao: inferDivisaoSugerida(descricao),
-        valorBRL: valorAdj,
-        valorUSD: valorUSDnum === '' ? '' : valorUSDnum,
-        cotacao: cotacao,
-        taxas: taxas,
-        parcelamento: parcelamento,
-        observacoes
-      });
+    // novo esquema
+    const idfF = f.identificacaoFatura || f.identificacao || {};
+    const banco = idfF.banco || 'Desconhecido';
+    const mesReferencia = idfF.mesReferencia || '';
+    const valorTotalFatura = idfF.valorTotal == null ? null : Number(idfF.valorTotal);
+    const dataVencimento = idfF.dataVencimento || '';
+    const dataFechamento = idfF.dataFechamento || '';
+    const periodoReferencia = idfF.periodoReferencia || '';
+
+    // Se existir array de cartoes no novo esquema
+    if (Array.isArray(f.cartoes)) {
+      for (const c of f.cartoes) {
+        const idfC = c.identificacaoCartao || {};
+        const titular = idfC.titular || '';
+        const bandeira = idfC.bandeira || '';
+        const tipoCartao = idfC.tipoCartao || '';
+        const finalCartao = idfC.finalCartao || '';
+        const cartaoLabel = [bandeira || tipoCartao ? `${bandeira} ${tipoCartao}`.trim() : '', finalCartao ? `final ${finalCartao}` : ''].filter(Boolean).join(' ');
+        const cartaoRaw = cartaoLabel || finalCartao || '';
+        const trans = Array.isArray(c.transacoes) ? c.transacoes : [];
+        for (const t of trans) {
+          const dataISO = t.data || '';
+          const d = dataISO ? new Date(dataISO) : null;
+          const data = d && !isNaN(d) ? fmtDate(d) : '';
+          const descricao = cleanDescricao(t.descricao || '', banco);
+          const local = t.local || '';
+          const estabelecimento = t.estabelecimento || '';
+          const categoriaRaw = t.categoria || '';
+          const valorBRLnum = Number(t.valorBRL ?? 0);
+          const valorUSDnum = t.valorUSD == null ? '' : Number(t.valorUSD);
+          const cotacao = t.cotacaoDolar == null ? '' : String(t.cotacaoDolar);
+          const iof = t.iof == null ? '' : String(t.iof);
+          const taxas = t.taxas == null ? '' : String(t.taxas);
+          const parcelamento = t.parcelamento || '';
+          const observacoes = t.observacoes || '';
+          const tipoLancamento = t.tipoLancamento || '';
+          const categoriaTipo = categoriaRaw || inferCategoria(descricao);
+          const abs = Math.abs(valorBRLnum || 0);
+          const isNegative = valorBRLnum < 0;
+          const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipo;
+          const valorAdj = isNegative ? -abs : abs;
+          const id = `${banco}${cartaoRaw ? ' '+cartaoRaw:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
+          out.push({
+            id,
+            banco: cartaoRaw ? `${banco} - ${cartaoRaw}` : banco,
+            bancoRaw: banco,
+            cartaoRaw: cartaoRaw,
+            titular: titular,
+            bandeira: bandeira,
+            tipoCartao: tipoCartao,
+            finalCartao: finalCartao,
+            mesReferencia: mesReferencia,
+            dataVencimento,
+            dataFechamento,
+            periodoReferencia,
+            valorTotalFatura,
+            data,
+            descricao,
+            estabelecimento,
+            local,
+            tipoLancamento,
+            descricaoNormalizada: normalizeDesc(descricao),
+            categoriaTipo: categoriaFinal,
+            divisao: inferDivisaoSugerida(descricao),
+            valorBRL: valorAdj,
+            valorUSD: valorUSDnum === '' ? '' : valorUSDnum,
+            cotacao: cotacao,
+            iof: iof,
+            taxas: taxas,
+            parcelamento: parcelamento,
+            observacoes
+          });
+        }
+      }
+    } else {
+      // fallback: esquema antigo direto em f.transacoes
+      const cartao = (idfF.cartao || '')
+      const trans = Array.isArray(f.transacoes) ? f.transacoes : [];
+      for (const t of trans) {
+        const dataISO = t.data || '';
+        const d = dataISO ? new Date(dataISO) : null;
+        const data = d && !isNaN(d) ? fmtDate(d) : '';
+        const descricao = cleanDescricao(t.descricao || '', banco);
+        const local = t.local || '';
+        const estabelecimento = t.estabelecimento || '';
+        const categoriaRaw = t.categoria || '';
+        const valorBRLnum = Number(t.valorBRL ?? 0);
+        const valorUSDnum = t.valorUSD == null ? '' : Number(t.valorUSD);
+        const cotacao = t.cotacaoDolar == null ? '' : String(t.cotacaoDolar);
+        const taxas = t.taxas == null ? '' : String(t.taxas);
+        const parcelamento = t.parcelamento || '';
+        const observacoes = t.observacoes || '';
+        const categoriaTipo = categoriaRaw || inferCategoria(descricao);
+        const abs = Math.abs(valorBRLnum || 0);
+        const isNegative = valorBRLnum < 0;
+        const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipo;
+        const valorAdj = isNegative ? -abs : abs;
+        const id = `${banco}${cartao ? ' '+cartao:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
+        out.push({
+          id,
+          banco: cartao ? `${banco} - ${cartao}` : banco,
+          bancoRaw: banco,
+          cartaoRaw: cartao,
+          mesReferencia: mesReferencia,
+          data,
+          descricao,
+          estabelecimento,
+          local,
+          descricaoNormalizada: normalizeDesc(descricao),
+          categoriaTipo: categoriaFinal,
+          divisao: inferDivisaoSugerida(descricao),
+          valorBRL: valorAdj,
+          valorUSD: valorUSDnum === '' ? '' : valorUSDnum,
+          cotacao: cotacao,
+          taxas: taxas,
+          parcelamento: parcelamento,
+          observacoes
+        });
+      }
     }
   }
   return out;
@@ -403,12 +481,18 @@ function recalcSummary() {
     if (div === 'Exclusiva') totalExclusivas += val;
     else totalGeral += val;
   }
-  const usuario = totalExclusivas + totalGeral * 0.6;
-  const esposa = totalGeral * 0.4;
+  const uPerc = Math.max(0, Math.min(100, Number(STATE.split.usuario) || 0));
+  const ePerc = 100 - uPerc;
+  const usuario = totalExclusivas + totalGeral * (uPerc / 100);
+  const esposa = totalGeral * (ePerc / 100);
   document.getElementById('sum-geral').textContent = fmtBRL(totalGeral);
   document.getElementById('sum-exclusivas').textContent = fmtBRL(totalExclusivas);
   document.getElementById('sum-usuario').textContent = fmtBRL(usuario);
   document.getElementById('sum-esposa').textContent = fmtBRL(esposa);
+  const lpU = document.getElementById('label-perc-usuario');
+  const lpE = document.getElementById('label-perc-esposa');
+  if (lpU) lpU.textContent = String(uPerc);
+  if (lpE) lpE.textContent = String(ePerc);
 
   renderFaturasSummary();
 }
@@ -522,6 +606,7 @@ function renderTable() {
     tr.appendChild(mk(t.valorBRL != null && t.valorBRL !== '' ? t.valorBRL.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
     tr.appendChild(mk(t.valorUSD !== '' ? Number(t.valorUSD).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
     tr.appendChild(mk(t.cotacao !== '' ? String(t.cotacao) : '', 'right'));
+  tr.appendChild(mk(t.iof !== '' ? Number(t.iof).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
     tr.appendChild(mk(t.taxas));
     tr.appendChild(mk(t.parcelamento));
     tr.appendChild(mk(t.observacoes));
@@ -600,6 +685,7 @@ function renderTable() {
       tr.appendChild(mk(t.valorBRL != null && t.valorBRL !== '' ? t.valorBRL.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
       tr.appendChild(mk(t.valorUSD !== '' ? Number(t.valorUSD).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
       tr.appendChild(mk(t.cotacao !== '' ? String(t.cotacao) : '', 'right'));
+  tr.appendChild(mk(t.iof !== '' ? Number(t.iof).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
       tr.appendChild(mk(t.taxas));
       tr.appendChild(mk(t.parcelamento));
       tr.appendChild(mk(t.observacoes));
@@ -614,6 +700,8 @@ function renderTable() {
   const has = STATE.transacoes.length > 0;
   document.getElementById('btn-export-csv').disabled = !has;
   document.getElementById('btn-export-xlsx').disabled = !has;
+
+  renderInsights(despesas);
 }
 
 function updateBancoFiltroOptions() {
@@ -625,7 +713,7 @@ function updateBancoFiltroOptions() {
 
 // CSV/XLSX export
 function exportCSV() {
-  const rows = [['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','Taxas','Parcelamento','Observações']];
+  const rows = [['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','IOF','Taxas','Parcelamento','Observações']];
   const all = applyFiltersSort();
   const despesas = all.filter(t => t.categoriaTipo !== 'Pagamento/Crédito');
   const pagamentos = all.filter(t => t.categoriaTipo === 'Pagamento/Crédito');
@@ -640,6 +728,7 @@ function exportCSV() {
       (Number(t.valorBRL)||0).toFixed(2).replace('.',','),
       t.valorUSD !== '' ? Number(t.valorUSD).toFixed(2).replace('.',',') : '',
       t.cotacao ?? '',
+      t.iof !== '' ? Number(t.iof).toFixed(2).replace('.',',') : '',
       t.taxas ?? '',
       t.parcelamento ?? '',
       t.observacoes ?? ''
@@ -673,6 +762,7 @@ function exportXLSX() {
     'Valor R$': Number(t.valorBRL)||0,
     'Valor USD': t.valorUSD !== '' ? Number(t.valorUSD) : '',
     Cotação: t.cotacao ?? '',
+  IOF: t.iof !== '' ? Number(t.iof) : '',
     Taxas: t.taxas ?? '',
     Parcelamento: t.parcelamento ?? '',
     Observações: t.observacoes ?? ''
@@ -894,10 +984,12 @@ function initUI() {
     STATE.regras = {};
   STATE.decisions = {};
     STATE.filters = { banco: '', texto: '', dataInicio: '', dataFim: '', divisao: '' };
+  STATE.split = { usuario: 60, esposa: 40 };
     localStorage.removeItem(LS_KEYS.data);
     localStorage.removeItem(LS_KEYS.rules);
     localStorage.removeItem(LS_KEYS.filters);
   localStorage.removeItem(LS_KEYS.decisions);
+  localStorage.removeItem(LS_KEYS.split);
     setStatus('Dados limpos.');
     updateBancoFiltroOptions();
     recalcSummary();
@@ -923,6 +1015,61 @@ function initUI() {
   document.getElementById('filtro-data-fim').value = STATE.filters.dataFim;
   document.getElementById('filtro-divisao').value = STATE.filters.divisao;
 
+  // configurar UI de divisão
+  const inputPerc = document.getElementById('input-perc-usuario');
+  const lblEsposaLive = document.getElementById('perc-esposa-live');
+  const btnResetSplit = document.getElementById('btn-reset-split');
+  const salU = document.getElementById('input-sal-usuario');
+  const salE = document.getElementById('input-sal-esposa');
+  const btnCalcSal = document.getElementById('btn-calcular-salarios');
+  if (inputPerc && lblEsposaLive) {
+    const u = Math.max(0, Math.min(100, Number(STATE.split.usuario) || 0));
+    inputPerc.value = String(u);
+    lblEsposaLive.textContent = String(100 - u);
+    inputPerc.addEventListener('input', () => {
+      const val = Math.max(0, Math.min(100, Number(inputPerc.value || 0)));
+      STATE.split.usuario = val;
+      STATE.split.esposa = 100 - val;
+      lblEsposaLive.textContent = String(STATE.split.esposa);
+      savePrefs();
+      recalcSummary();
+    });
+  }
+  if (btnResetSplit) {
+    btnResetSplit.addEventListener('click', () => {
+      STATE.split = { usuario: 60, esposa: 40 };
+      const u = document.getElementById('input-perc-usuario');
+      const lbl = document.getElementById('perc-esposa-live');
+      if (u) u.value = '60';
+      if (lbl) lbl.textContent = '40';
+      savePrefs();
+      recalcSummary();
+    });
+  }
+  if (btnCalcSal) {
+    btnCalcSal.addEventListener('click', () => {
+      const vU = Number((salU && salU.value) ? salU.value : 0) || 0;
+      const vE = Number((salE && salE.value) ? salE.value : 0) || 0;
+      const total = vU + vE;
+      if (!isFinite(total) || total <= 0) {
+        setStatus('Informe salários válidos para calcular a proporção.');
+        return;
+      }
+      // proporção pelo salário: usuário = vU/total * 100
+      const uPerc = Math.round((vU / total) * 100);
+      const ePerc = 100 - uPerc; // garante soma 100
+      STATE.split = { usuario: uPerc, esposa: ePerc };
+      // refletir na UI manual também
+      const inp = document.getElementById('input-perc-usuario');
+      const lbl = document.getElementById('perc-esposa-live');
+      if (inp) inp.value = String(uPerc);
+      if (lbl) lbl.textContent = String(ePerc);
+      savePrefs();
+      recalcSummary();
+      setStatus(`Proporção atualizada pelos salários: Usuário ${uPerc}% / Esposa ${ePerc}%.`);
+    });
+  }
+
   // estado inicial
   migrateRegrasInPlace();
   loadAutoSaveHandle();
@@ -932,3 +1079,74 @@ function initUI() {
 }
 
 window.addEventListener('DOMContentLoaded', initUI);
+
+// --- Insights com Chart.js ---
+let CHARTS = { cat: null, est: null, loc: null };
+function renderInsights(despesas) {
+  try {
+    const ctxCat = document.getElementById('chart-categorias');
+    const ctxEst = document.getElementById('chart-estabelecimentos');
+    const ctxLoc = document.getElementById('chart-locais');
+    if (!ctxCat || !ctxEst || !ctxLoc || !window.Chart) return;
+
+    // Agrupamentos
+    const sumBy = (arr, keyFn) => {
+      const m = new Map();
+      for (const t of arr) {
+        const k = keyFn(t) || '—';
+        m.set(k, (m.get(k) || 0) + (Number(t.valorBRL) || 0));
+      }
+      return [...m.entries()].sort((a,b) => b[1]-a[1]);
+    };
+    const topN = (entries, n=10) => entries.slice(0, n);
+
+    const cat = topN(sumBy(despesas, t => t.categoriaTipo));
+    const est = topN(sumBy(despesas, t => t.estabelecimento || t.descricao));
+    const loc = topN(sumBy(despesas, t => t.local));
+
+    // Helpers
+    const mkCfg = (labels, values, title) => ({
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: title,
+          data: values,
+          backgroundColor: 'rgba(56, 189, 248, 0.5)',
+          borderColor: 'rgb(56, 189, 248)',
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: false, // desabilita para evitar loops de resize
+        animation: false,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => ` ${fmtBRL(ctx.parsed.y)}`
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#94a3b8', autoSkip: true, maxRotation: 0 } },
+          y: { ticks: { color: '#94a3b8', callback: (v) => fmtBRL(v) } }
+        }
+      }
+    });
+
+    const [catL, catV] = [cat.map(x=>x[0]), cat.map(x=>Number(x[1].toFixed(2)))];
+    const [estL, estV] = [est.map(x=>x[0]), est.map(x=>Number(x[1].toFixed(2)))];
+    const [locL, locV] = [loc.map(x=>x[0]), loc.map(x=>Number(x[1].toFixed(2)))];
+
+    // Destroy previous charts
+    for (const k of Object.keys(CHARTS)) { if (CHARTS[k]) { CHARTS[k].destroy(); CHARTS[k] = null; } }
+
+  CHARTS.cat = new Chart(ctxCat.getContext('2d'), mkCfg(catL, catV, 'Categorias'));
+  CHARTS.est = new Chart(ctxEst.getContext('2d'), mkCfg(estL, estV, 'Estabelecimentos'));
+  CHARTS.loc = new Chart(ctxLoc.getContext('2d'), mkCfg(locL, locV, 'Locais'));
+  } catch (e) {
+    console.warn('Falha ao renderizar insights', e);
+  }
+}

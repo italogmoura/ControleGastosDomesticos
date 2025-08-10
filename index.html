@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Controle de Faturas 60/40</title>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Controle de Faturas 60/40</h1>
+      <div class="actions">
+        <label class="btn">
+          <input id="file-input" type="file" accept="application/pdf" multiple hidden />
+          <span>Selecionar PDFs</span>
+        </label>
+        <button id="btn-export-csv" class="btn" disabled>Exportar CSV</button>
+        <button id="btn-export-xlsx" class="btn" disabled>Exportar XLSX</button>
+        <button id="btn-limpar" class="btn btn-secondary">Limpar dados</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section id="dropzone" class="dropzone" tabindex="0" aria-label="Solte aqui seus PDFs">
+        <p>Arraste e solte suas faturas em PDF aqui ou use o botão "Selecionar PDFs"</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Filtros</h2>
+          <div class="filters">
+            <select id="filtro-banco" title="Filtrar por banco">
+              <option value="">Todos os bancos</option>
+            </select>
+            <input id="filtro-texto" type="search" placeholder="Buscar por descrição..." />
+            <input id="filtro-data-inicio" type="date" />
+            <span>até</span>
+            <input id="filtro-data-fim" type="date" />
+            <select id="filtro-divisao">
+              <option value="">Todas as divisões</option>
+              <option value="Geral">Geral (compartilhada)</option>
+              <option value="Exclusiva">Exclusivas do usuário</option>
+            </select>
+            <button id="btn-aplicar-filtros" class="btn btn-secondary">Aplicar</button>
+          </div>
+        </div>
+        <div id="status" class="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="summary" id="summary">
+          <div>
+            <div class="label">Total Geral (a dividir):</div>
+            <div class="value" id="sum-geral">R$ 0,00</div>
+          </div>
+          <div>
+            <div class="label">Total Exclusivas (Usuário):</div>
+            <div class="value" id="sum-exclusivas">R$ 0,00</div>
+          </div>
+          <div>
+            <div class="label">Usuário (60% do Geral + Exclusivas):</div>
+            <div class="value" id="sum-usuario">R$ 0,00</div>
+          </div>
+          <div>
+            <div class="label">Esposa (40% do Geral):</div>
+            <div class="value" id="sum-esposa">R$ 0,00</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Lançamentos</h2>
+          <div class="legend">
+            <span class="badge badge-sugerido" title="Classificação sugerida por aprendizado">Sugerido</span>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table id="tabela" class="data-table">
+            <thead>
+              <tr>
+                <th class="index-col">#</th>
+                <th data-key="data" class="sortable">Data</th>
+                <th data-key="banco" class="sortable">Banco/Cartão</th>
+                <th data-key="descricao" class="sortable">Descrição</th>
+                <th data-key="categoriaTipo" class="sortable">Categoria</th>
+                <th data-key="divisao" class="sortable">Divisão</th>
+                <th data-key="valorBRL" class="sortable right">Valor R$</th>
+                <th data-key="valorUSD" class="sortable right">USD</th>
+                <th data-key="cotacao" class="sortable right">Cotação</th>
+                <th data-key="taxas" class="sortable">Taxas</th>
+                <th data-key="parcelamento" class="sortable">Parcelamento</th>
+                <th data-key="observacoes" class="sortable">Observações</th>
+              </tr>
+            </thead>
+            <tbody id="tabela-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Pagamentos e Estornos (separados)</h2>
+          <div class="legend" id="legend-pag-count"></div>
+        </div>
+        <div class="table-wrapper">
+          <table id="tabela-pag" class="data-table">
+            <thead>
+              <tr>
+                <th class="index-col">#</th>
+                <th>Data</th>
+                <th>Banco/Cartão</th>
+                <th>Descrição</th>
+                <th>Categoria</th>
+                <th class="right">Valor R$</th>
+                <th>Observações</th>
+              </tr>
+            </thead>
+            <tbody id="tabela-pag-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- pdf.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+      // Configura o worker do pdf.js somente se a lib estiver disponível
+      if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      } else {
+        console.warn('pdf.js não carregado ainda; seguindo sem configurar worker.');
+      }
+    </script>
+
+    <!-- SheetJS para exportar XLSX -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -131,11 +131,11 @@ Observações:
 
 ## Desenvolvimento
 
-- Sem dependências locais; bibliotecas via CDN: SheetJS (xlsx).
+- Sem dependências locais; bibliotecas via CDN: SheetJS (xlsx), Apache ECharts.
 - Estrutura:
   - `index.html` – UI e carregamento das libs.
   - `styles.css` – estilo básico.
-  - `app.js` – lógica: upload de JSON, mapeamento (novo esquema aninhado), filtros, ordenação, aprendizado, insights (Chart.js) e export.
+  - `app.js` – lógica: upload de JSON, mapeamento (novo esquema aninhado), filtros, ordenação, aprendizado, insights (Apache ECharts) e export.
 
 ## Próximos passos sugeridos
 

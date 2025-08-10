@@ -4,123 +4,106 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a client-side web application called "Controle de Faturas 60/40" - a domestic expense control system that processes credit card statements (faturas) from PDF files and automatically categorizes transactions with a 60/40 splitting mechanism between partners.
+This is a client-side expense control application that processes credit card PDF bills to extract transactions, categorize them, and calculate 60/40 expense splits between users. The application is built entirely with vanilla JavaScript and runs in the browser without server dependencies.
 
-## Development Commands
+## How to Run and Test
 
-### Running the Application
-```bash
-# No build process required - simply open in browser
-open index.html
-# Or serve via local server if needed:
-python3 -m http.server 8000
-# Then visit: http://localhost:8000
-```
+**Development/Testing:**
+- Open `index.html` directly in Chrome browser (double-click or drag to browser tab)
+- No build process needed - all dependencies are loaded via CDN
+- Chrome is recommended due to File System Access API support for auto-save features
 
-### Testing
-```bash
-# Use sample PDFs in doc/exemploFaturas/ for testing:
-# - Fatura Amazon - ago.pdf
-# - Fatura Nubank - ago.pdf  
-# - fatura Itaú - ago.pdf
-# - fatura rico - ago.pdf
-```
-
-### Browser Requirements
-- **Chrome recommended** (best PDF.js compatibility)
-- Must support ES6+ features and localStorage
-- Requires internet connection for CDN dependencies (pdf.js, SheetJS)
-
-## Architecture
-
-### Core System Flow
-1. **PDF Upload** → Drag & drop or file selection
-2. **Text Extraction** → pdf.js processes PDF to extract text and reconstruct visual lines
-3. **Bank Detection** → Heuristic analysis of content and filename to identify bank
-4. **Transaction Parsing** → Bank-specific parsers extract structured data
-5. **Smart Classification** → Machine learning categorization with user feedback loop
-6. **60/40 Calculation** → Automatic expense splitting (Geral vs Exclusiva)
-7. **Export** → CSV/XLSX generation
-
-### Key Modules
-
-#### PDF Processing (`app.js:105-147`)
-- `extractTextFromPDF()` - Uses pdf.js to extract text and reconstruct visual table rows
-- Handles coordinate-based text positioning to rebuild table structure
-- Disables workers to avoid CORS issues with file:// protocol
-
-#### Bank Detection (`app.js:79-103`)
-- `detectBanco()` - Identifies bank from text content and filename
-- Supports: Nubank, Itaú, Amazon, Rico
-- Uses diacritic-insensitive matching for Brazilian Portuguese
-
-#### Transaction Parsing
-- `parseTransacoesGeneric()` (`app.js:150-353`) - Main parser with fallback strategies
-- `parseTransacoesAmazon()` (`app.js:356-450`) - Specialized Amazon parser
-- Handles various date formats: DD/MM/YYYY, DD/MM, DD mon
-- Extracts: date, description, values (BRL/USD), exchange rate, installments, taxes
-
-#### Machine Learning Classification
-- `inferDivisaoSugerida()` (`app.js:467-473`) - Learns from user choices
-- `confirmarDivisao()` (`app.js:484-489`) - Updates learning model
-- `STATE.regras` object stores learned patterns by normalized description
-
-#### State Management
-- All data persisted in localStorage with versioned keys
-- `STATE` object manages: transactions, filters, sort preferences, learning rules
-- No external database required
-
-### Data Structure
-
-#### Transaction Object
-```javascript
-{
-  id: `${banco}|${data}|${descricao}|${valor}`,
-  banco: string,           // Bank name
-  data: string,            // DD/MM/YY format
-  descricao: string,       // Clean description
-  descricaoNormalizada: string, // Normalized for learning
-  categoriaTipo: string,   // Auto-categorized type
-  divisao: string,         // "Geral" | "Exclusiva" + "(sugerido)"
-  valorBRL: number,        // Amount in BRL
-  valorUSD: string,        // USD amount if international
-  cotacao: string,         // Exchange rate
-  taxas: string,          // IOF, fees
-  parcelamento: string,   // Installment info "n/total"
-  observacoes: string     // Additional notes
-}
-```
-
-## Important Development Notes
-
-### Adding New Bank Support
-1. Update `detectBanco()` with bank identification patterns
-2. Consider creating specialized parser like `parseTransacoesAmazon()`
-3. Test with actual PDF samples
-4. Update category inference rules in `inferCategoria()`
-
-### Text Processing Considerations
-- PDFs must contain extractable text (not scanned images - no OCR support)
-- Different banks have varied statement layouts requiring heuristic adjustments
-- `cleanDescricao()` removes bank-specific prefixes (especially Nubank masked card numbers)
-
-### Performance Notes
-- All processing happens client-side for privacy
-- Large PDFs may cause memory issues
-- Consider pagination for very long statements
-
-### Debugging
-- Check browser console for parsing errors
-- Use `STATE.transacoes` to inspect parsed data
-- Sample PDFs in `doc/exemploFaturas/` for testing new features
-
-## File Structure
+**File Structure:**
 - `index.html` - Main UI and library loading
-- `app.js` - Core logic (parsing, learning, export)
-- `styles.css` - Dark theme styling
-- `doc/exemploFaturas/` - Sample PDF files for testing
-- `doc/Prompt.txt` - Original AI prompt for the system requirements
+- `app.js` - Core application logic (PDF parsing, transaction processing, learning system)
+- `styles.css` - Dark theme styling with responsive design
+- `doc/Prompt.txt` - Contains the original AI prompt used for expense categorization rules
+- `doc/exemploFaturas/` - Sample PDF bills for testing parsers
 
-## External Dependencies (CDN)
-- pdf.js 3.11.174 - PDF text extraction
-- SheetJS 0.18.5 - XLSX export functionality
+## Core Architecture
+
+**PDF Processing Pipeline:**
+1. PDF text extraction using pdf.js library
+2. Bank detection via heuristics (filename + content analysis)
+3. Bank-specific parsers for transaction extraction
+4. Transaction normalization and categorization
+5. Machine learning for expense division suggestions
+
+**Bank Parser System:**
+- Generic parser handles most banks with date + description + value pattern matching
+- Specialized parsers for complex formats:
+  - `parseTransacoesAmazon()` - Amazon credit card statements
+  - `parseItauFromText()` - Itaú cards with multi-line transaction format
+  - `itauPreprocessRows()` - Handles Itaú's two-column layout issues
+
+**Data Storage:**
+- localStorage for user preferences, filters, and learning rules
+- IndexedDB for File System Access API handles (Chrome auto-save feature)
+- All processing is client-side only
+
+**Learning System:**
+- Tracks user's "Geral" vs "Exclusiva" choices per transaction description
+- Uses normalized description as key for future suggestions
+- Maintains counters for each choice to determine majority preference
+- Supports import/export of learning rules in JSON format
+
+## Key Components
+
+**Transaction Processing (`app.js:335-964`):**
+- `parseTransacoesGeneric()` - Main transaction parser with fallback logic
+- `cleanDescricao()` - Removes card prefixes (especially Nubank masked numbers)
+- `inferCategoria()` - Auto-categorizes transactions based on merchant patterns
+- `detectBanco()` - Identifies bank from PDF content and filename
+
+**UI State Management (`app.js:12-77`):**
+- `STATE` object holds all application data (transactions, filters, rules)
+- Automatic persistence to localStorage
+- Real-time table updates when data changes
+
+**Export Functionality:**
+- CSV export with proper Brazilian formatting (comma decimal separator)
+- XLSX export using SheetJS library
+- Learning rules export/import for backup/sharing
+
+## Development Notes
+
+**Parser Testing:**
+- Use `window.testItauParser()` in browser console to test Itaú parsing edge cases
+- Test cases include two-column layout problems and various transaction formats
+
+**Adding New Bank Support:**
+1. Add bank detection logic in `detectBanco()`
+2. Create specialized parser function if needed
+3. Update `parseTransacoesGeneric()` to use new parser
+4. Test with sample PDFs
+
+**Transaction Categories:**
+- Categories are defined in `inferCategoria()` using regex patterns
+- Common patterns: iFood (IFD*), Uber, pharmacies, supermarkets, streaming services
+- Default category is "Outros" for unmatched transactions
+
+**File System Access API:**
+- Auto-save feature requires HTTPS or localhost
+- Only supported in Chrome/Edge browsers
+- Fallback to manual export/import for other browsers
+
+## Important Implementation Details
+
+**Date Parsing:**
+- Supports DD/MM, DD/MM/YY, DD/MM/YYYY formats
+- Also handles Portuguese abbreviated months (jan, fev, mar, etc.)
+- Year defaults to current year when not specified
+
+**Value Parsing:**
+- Handles Brazilian currency format (1.234,56)
+- Supports parentheses and trailing minus for negative values
+- Detects USD amounts and exchange rates for international transactions
+
+**Transaction Deduplication:**
+- Uses composite ID: `${banco}|${data}|${descricao}|${valor}`
+- Prevents duplicate imports when reprocessing same PDF files
+
+**Responsive Design:**
+- Tables use horizontal scrolling on narrow screens
+- Summary grid adapts from 4 to 2 to 1 column based on screen width
+- Touch-friendly controls for mobile usage

@@ -263,6 +263,7 @@ function mapJsonToTransactions(json, filename = '') {
     const idf = f.identificacao || {};
     const banco = idf.banco || 'Desconhecido';
     const cartao = idf.cartao || '';
+  const mesReferencia = idf.mesReferencia || '';
     const trans = Array.isArray(f.transacoes) ? f.transacoes : [];
     for (const t of trans) {
       const dataISO = t.data || '';
@@ -283,10 +284,13 @@ function mapJsonToTransactions(json, filename = '') {
       const isNegative = valorBRLnum < 0;
       const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipo;
       const valorAdj = isNegative ? -abs : abs;
-      const id = `${banco}${cartao ? ' '+cartao:''}|${data}|${descricao}|${valorAdj}`;
+      const id = `${banco}${cartao ? ' '+cartao:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
       out.push({
         id,
         banco: cartao ? `${banco} - ${cartao}` : banco,
+        bancoRaw: banco,
+        cartaoRaw: cartao,
+        mesReferencia: mesReferencia,
         data,
         descricao,
         local,
@@ -405,6 +409,57 @@ function recalcSummary() {
   document.getElementById('sum-exclusivas').textContent = fmtBRL(totalExclusivas);
   document.getElementById('sum-usuario').textContent = fmtBRL(usuario);
   document.getElementById('sum-esposa').textContent = fmtBRL(esposa);
+
+  renderFaturasSummary();
+}
+
+// Gera cards por fatura com total da fatura e quantidade de transações detectadas
+function renderFaturasSummary() {
+  const wrap = document.getElementById('faturas-summary');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  if (!STATE.transacoes.length) return;
+
+  // Agrupar por (bancoRaw, cartaoRaw, mesReferencia)
+  const groups = new Map();
+  for (const t of STATE.transacoes) {
+    const key = `${t.bancoRaw || ''}|||${t.cartaoRaw || ''}|||${t.mesReferencia || ''}`;
+    if (!groups.has(key)) {
+      groups.set(key, { banco: t.bancoRaw || 'Desconhecido', cartao: t.cartaoRaw || '', mesRef: t.mesReferencia || '', total: 0, count: 0 });
+    }
+    const g = groups.get(key);
+    // contar tudo que não é pagamento/crédito para o total da fatura
+    if (t.categoriaTipo !== 'Pagamento/Crédito') g.total += Number(t.valorBRL) || 0;
+    g.count += 1; // total de transações detectadas (inclui pagamentos/estornos)
+  }
+
+  // Criar cards
+  for (const g of groups.values()) {
+    const card = document.createElement('div');
+    card.className = 'fatura-card';
+    const title = [g.banco, g.cartao].filter(Boolean).join(' - ') || 'Fatura';
+    const head = document.createElement('div');
+    head.className = 'fatura-head';
+    const hTitle = document.createElement('div');
+    hTitle.className = 'fatura-title';
+    hTitle.textContent = title;
+    const hRight = document.createElement('div');
+    hRight.textContent = g.mesRef || '';
+    head.appendChild(hTitle);
+    head.appendChild(hRight);
+    card.appendChild(head);
+
+    const row1 = document.createElement('div');
+    row1.className = 'row';
+    row1.innerHTML = `<span class="label">Total da fatura</span><span class="value">${fmtBRL(g.total)}</span>`;
+    const row2 = document.createElement('div');
+    row2.className = 'row';
+    row2.innerHTML = `<span class="label">Transações detectadas</span><span class="value">${g.count}</span>`;
+    card.appendChild(row1);
+    card.appendChild(row2);
+
+    wrap.appendChild(card);
+  }
 }
 
 function renderTable() {

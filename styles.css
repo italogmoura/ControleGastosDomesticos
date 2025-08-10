@@ -50,6 +50,35 @@ body {
 .summary .label { color: var(--muted); font-size: 12px; }
 .summary .value { font-size: 18px; font-weight: 700; }
 
+.faturas-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 16px 16px 16px;
+}
+.fatura-card {
+  background: #0b1220;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 12px;
+}
+.fatura-card .fatura-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; color: var(--muted);
+  font-size: 12px;
+}
+.fatura-card .fatura-title { font-weight: 700; color: var(--text); font-size: 14px; }
+.fatura-card .row { display:flex; justify-content: space-between; font-size: 13px; margin-top: 4px; }
+.fatura-card .row .label { color: var(--muted); }
+.fatura-card .row .value { font-weight: 700; }
+
+@media (max-width: 920px) {
+  .faturas-summary { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .faturas-summary { grid-template-columns: 1fr; }
+}
+
 .table-wrapper { overflow: auto; }
 .data-table { width: 100%; border-collapse: collapse; }
 .data-table thead th { position: sticky; top: 0; background: #0b1220; z-index: 1; }

@@ -17,6 +17,13 @@
         </label>
         <button id="btn-export-csv" class="btn" disabled>Exportar CSV</button>
         <button id="btn-export-xlsx" class="btn" disabled>Exportar XLSX</button>
+        <button id="btn-export-regras" class="btn btn-secondary">Exportar Regras</button>
+        <label class="btn btn-secondary">
+          <input id="input-import-regras" type="file" accept="application/json" hidden />
+          <span>Importar Regras</span>
+        </label>
+  <button id="btn-setup-auto-save" class="btn btn-secondary auto-save-btn" title="Salvamento automático requer Chrome/Edge em HTTPS ou localhost">Ativar salvamento automático (Chrome/Edge)</button>
+  <span id="auto-save-status" class="badge" aria-live="polite"></span>
         <button id="btn-limpar" class="btn btn-secondary">Limpar dados</button>
       </div>
     </header>
@@ -46,6 +53,17 @@
           </div>
         </div>
         <div id="status" class="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Configurações</h2>
+        </div>
+        <div class="status" style="display:flex; gap:8px; align-items:center; padding: 12px 16px;">
+          <button id="btn-setup-auto-save-2" class="btn btn-secondary auto-save-btn" title="Requer Chrome/Edge em HTTPS ou localhost">Ativar salvamento automático</button>
+          <span id="auto-save-status-2" class="badge" aria-live="polite"></span>
+          <span style="color: var(--muted);">Dica: use Exportar/Importar Regras se seu navegador não suportar auto-save.</span>
+        </div>
       </section>
 
       <section class="panel">
@@ -84,6 +102,7 @@
                 <th data-key="data" class="sortable">Data</th>
                 <th data-key="banco" class="sortable">Banco/Cartão</th>
                 <th data-key="descricao" class="sortable">Descrição</th>
+                <th data-key="local" class="sortable">Local</th>
                 <th data-key="categoriaTipo" class="sortable">Categoria</th>
                 <th data-key="divisao" class="sortable">Divisão</th>
                 <th data-key="valorBRL" class="sortable right">Valor R$</th>
@@ -112,12 +131,42 @@
                 <th>Data</th>
                 <th>Banco/Cartão</th>
                 <th>Descrição</th>
+                <th>Local</th>
                 <th>Categoria</th>
                 <th class="right">Valor R$</th>
                 <th>Observações</th>
               </tr>
             </thead>
             <tbody id="tabela-pag-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Despesa Exclusiva Ítalo</h2>
+          <div class="legend" id="legend-exc-count"></div>
+        </div>
+        <div class="table-wrapper">
+          <table id="tabela-exclusiva" class="data-table">
+            <thead>
+              <tr>
+                <th class="index-col">#</th>
+                <th data-key="data" class="sortable">Data</th>
+                <th data-key="banco" class="sortable">Banco/Cartão</th>
+                <th data-key="descricao" class="sortable">Descrição</th>
+                <th data-key="local" class="sortable">Local</th>
+                <th data-key="categoriaTipo" class="sortable">Categoria</th>
+                <th data-key="divisao" class="sortable">Divisão</th>
+                <th data-key="valorBRL" class="sortable right">Valor R$</th>
+                <th data-key="valorUSD" class="sortable right">USD</th>
+                <th data-key="cotacao" class="sortable right">Cotação</th>
+                <th data-key="taxas" class="sortable">Taxas</th>
+                <th data-key="parcelamento" class="sortable">Parcelamento</th>
+                <th data-key="observacoes" class="sortable">Observações</th>
+              </tr>
+            </thead>
+            <tbody id="tabela-exc-body"></tbody>
           </table>
         </div>
       </section>

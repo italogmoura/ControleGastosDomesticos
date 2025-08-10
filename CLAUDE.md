@@ -4,70 +4,123 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a client-side expense management web application that runs entirely in the browser. It processes credit card PDF statements, splits expenses between users (60/40 ratio), and provides export capabilities.
+This is a client-side web application called "Controle de Faturas 60/40" - a domestic expense control system that processes credit card statements (faturas) from PDF files and automatically categorizes transactions with a 60/40 splitting mechanism between partners.
 
 ## Development Commands
 
-**No build system or npm commands** - This is a static web application:
-- **Run:** Open `index.html` directly in Chrome browser
-- **Test:** Use sample PDFs in `doc/exemploFaturas/` folder
-- **Deploy:** Simply copy all files to a web server (static hosting)
+### Running the Application
+```bash
+# No build process required - simply open in browser
+open index.html
+# Or serve via local server if needed:
+python3 -m http.server 8000
+# Then visit: http://localhost:8000
+```
 
-## Architecture & Structure
+### Testing
+```bash
+# Use sample PDFs in doc/exemploFaturas/ for testing:
+# - Fatura Amazon - ago.pdf
+# - Fatura Nubank - ago.pdf  
+# - fatura Itaú - ago.pdf
+# - fatura rico - ago.pdf
+```
 
-### Core Components
+### Browser Requirements
+- **Chrome recommended** (best PDF.js compatibility)
+- Must support ES6+ features and localStorage
+- Requires internet connection for CDN dependencies (pdf.js, SheetJS)
 
-**app.js (809 lines)** - Main application logic organized into sections:
-1. **Constants & State** (lines 1-50): `LS_KEYS`, `STATE` object
-2. **PDF Processing** (lines 50-400): Bank detection, text extraction, transaction parsing
-3. **UI Management** (lines 400-600): Table rendering, filtering, sorting
-4. **Data Persistence** (lines 600-700): localStorage operations
-5. **Export Functions** (lines 700-809): CSV and XLSX generation
+## Architecture
 
-### Key Architectural Patterns
+### Core System Flow
+1. **PDF Upload** → Drag & drop or file selection
+2. **Text Extraction** → pdf.js processes PDF to extract text and reconstruct visual lines
+3. **Bank Detection** → Heuristic analysis of content and filename to identify bank
+4. **Transaction Parsing** → Bank-specific parsers extract structured data
+5. **Smart Classification** → Machine learning categorization with user feedback loop
+6. **60/40 Calculation** → Automatic expense splitting (Geral vs Exclusiva)
+7. **Export** → CSV/XLSX generation
 
-- **State Management:** Single global `STATE` object with localStorage persistence
-- **Bank Processors:** Each bank (Amazon, Nubank, Itaú, Rico) has dedicated parsing logic
-- **Learning System:** Tracks user classifications in `STATE.userPreferences` for future suggestions
-- **Event Delegation:** Main table uses event delegation for row interactions
+### Key Modules
 
-### Critical Functions
+#### PDF Processing (`app.js:105-147`)
+- `extractTextFromPDF()` - Uses pdf.js to extract text and reconstruct visual table rows
+- Handles coordinate-based text positioning to rebuild table structure
+- Disables workers to avoid CORS issues with file:// protocol
 
-- `processPDF()`: Entry point for PDF processing - detects bank and routes to specific parser
-- `detectBankFromPDF()`: Uses heuristics to identify bank type
-- `parseAmazonPDF()`, `parseNubankPDF()`, etc.: Bank-specific parsing logic
-- `updateSummary()`: Recalculates expense splits whenever data changes
-- `saveToLocalStorage()`: Persists entire application state
+#### Bank Detection (`app.js:79-103`)
+- `detectBanco()` - Identifies bank from text content and filename
+- Supports: Nubank, Itaú, Amazon, Rico
+- Uses diacritic-insensitive matching for Brazilian Portuguese
 
-### Data Flow
+#### Transaction Parsing
+- `parseTransacoesGeneric()` (`app.js:150-353`) - Main parser with fallback strategies
+- `parseTransacoesAmazon()` (`app.js:356-450`) - Specialized Amazon parser
+- Handles various date formats: DD/MM/YYYY, DD/MM, DD mon
+- Extracts: date, description, values (BRL/USD), exchange rate, installments, taxes
 
-1. User drops PDF → `processPDF()` extracts text
-2. Bank detection → Routes to specific parser
-3. Parser extracts transactions → Adds to `STATE.transactions`
-4. User classifies expenses → Updates `STATE.userPreferences`
-5. Export functions → Generate CSV/XLSX from current state
+#### Machine Learning Classification
+- `inferDivisaoSugerida()` (`app.js:467-473`) - Learns from user choices
+- `confirmarDivisao()` (`app.js:484-489`) - Updates learning model
+- `STATE.regras` object stores learned patterns by normalized description
 
-## Important Considerations
+#### State Management
+- All data persisted in localStorage with versioned keys
+- `STATE` object manages: transactions, filters, sort preferences, learning rules
+- No external database required
 
-### PDF Processing
-- **Chrome Required:** PDF.js works best in Chrome
-- **Text Extraction:** PDFs are parsed as text, not OCR - requires selectable text
-- **Bank Formats:** Each bank has unique table structure requiring custom parsing
+### Data Structure
 
-### Expense Classification
-- **60/40 Split:** "Geral" expenses split 60% User1, 40% User2
-- **Learning System:** Automatically suggests classifications based on past choices
-- **Manual Override:** Users can always change suggested classifications
+#### Transaction Object
+```javascript
+{
+  id: `${banco}|${data}|${descricao}|${valor}`,
+  banco: string,           // Bank name
+  data: string,            // DD/MM/YY format
+  descricao: string,       // Clean description
+  descricaoNormalizada: string, // Normalized for learning
+  categoriaTipo: string,   // Auto-categorized type
+  divisao: string,         // "Geral" | "Exclusiva" + "(sugerido)"
+  valorBRL: number,        // Amount in BRL
+  valorUSD: string,        // USD amount if international
+  cotacao: string,         // Exchange rate
+  taxas: string,          // IOF, fees
+  parcelamento: string,   // Installment info "n/total"
+  observacoes: string     // Additional notes
+}
+```
 
-### Testing New Banks
-When adding support for new banks:
-1. Get sample PDF in `doc/exemploFaturas/`
-2. Add detection logic in `detectBankFromPDF()`
-3. Create new parser function following existing patterns
-4. Test transaction extraction thoroughly
+## Important Development Notes
 
-### Browser Compatibility
-- Uses modern JavaScript (ES6+) - no transpilation
-- Requires localStorage support
-- File API for drag-and-drop
-- No Internet Explorer support
+### Adding New Bank Support
+1. Update `detectBanco()` with bank identification patterns
+2. Consider creating specialized parser like `parseTransacoesAmazon()`
+3. Test with actual PDF samples
+4. Update category inference rules in `inferCategoria()`
+
+### Text Processing Considerations
+- PDFs must contain extractable text (not scanned images - no OCR support)
+- Different banks have varied statement layouts requiring heuristic adjustments
+- `cleanDescricao()` removes bank-specific prefixes (especially Nubank masked card numbers)
+
+### Performance Notes
+- All processing happens client-side for privacy
+- Large PDFs may cause memory issues
+- Consider pagination for very long statements
+
+### Debugging
+- Check browser console for parsing errors
+- Use `STATE.transacoes` to inspect parsed data
+- Sample PDFs in `doc/exemploFaturas/` for testing new features
+
+## File Structure
+- `index.html` - Main UI and library loading
+- `app.js` - Core logic (parsing, learning, export)
+- `styles.css` - Dark theme styling
+- `doc/exemploFaturas/` - Sample PDF files for testing
+- `doc/Prompt.txt` - Original AI prompt for the system requirements
+
+## External Dependencies (CDN)
+- pdf.js 3.11.174 - PDF text extraction
+- SheetJS 0.18.5 - XLSX export functionality

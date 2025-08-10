@@ -5,7 +5,8 @@ const LS_KEYS = {
   sort: 'cg_sort_v1',
   filters: 'cg_filters_v1',
   rules: 'cg_rules_v1',
-  data: 'cg_data_v1'
+  data: 'cg_data_v1',
+  decisions: 'cg_decisions_v1'
 };
 
 const STATE = {
@@ -13,6 +14,8 @@ const STATE = {
   sort: JSON.parse(localStorage.getItem(LS_KEYS.sort) || 'null') || { key: 'data', dir: 'asc' },
   filters: JSON.parse(localStorage.getItem(LS_KEYS.filters) || 'null') || { banco: '', texto: '', dataInicio: '', dataFim: '', divisao: '' },
   regras: JSON.parse(localStorage.getItem(LS_KEYS.rules) || 'null') || {}, // descricaoNormalizada -> { divisao: 'Geral'|'Exclusiva', score: number }
+  decisions: JSON.parse(localStorage.getItem(LS_KEYS.decisions) || 'null') || {}, // id -> { key, divisao }
+  autoSave: { enabled: false, handle: null }
 };
 
 // Utils
@@ -70,6 +73,147 @@ function savePrefs() {
   localStorage.setItem(LS_KEYS.sort, JSON.stringify(STATE.sort));
   localStorage.setItem(LS_KEYS.filters, JSON.stringify(STATE.filters));
   localStorage.setItem(LS_KEYS.rules, JSON.stringify(STATE.regras));
+  localStorage.setItem(LS_KEYS.decisions, JSON.stringify(STATE.decisions));
+}
+
+// --- File System Access API helpers (opcional) ---
+const FS_SUPPORT = !!(window.showSaveFilePicker && window.isSecureContext);
+
+// Pequena camada IndexedDB para guardar o file handle (quando suportado)
+const DB_NAME = 'cg_rules_db_v1';
+const DB_STORE = 'handles';
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const req = tx.objectStore(DB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbDel(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function setupAutoSaveHandle() {
+  if (!FS_SUPPORT) throw new Error('Navegador sem suporte à File System Access API ou contexto não seguro.');
+  const handle = await window.showSaveFilePicker({
+    suggestedName: 'regras_divisao.json',
+    types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
+  });
+  // Tenta permissão rw
+  const perm = await handle.requestPermission({ mode: 'readwrite' });
+  if (perm !== 'granted') throw new Error('Permissão negada para gravar arquivo.');
+  await idbSet('rulesHandle', handle);
+  STATE.autoSave = { enabled: true, handle };
+  setStatus('Salvamento automático ativado.');
+  updateAutoSaveStatusUI();
+}
+
+async function loadAutoSaveHandle() {
+  if (!FS_SUPPORT) return;
+  try {
+    const handle = await idbGet('rulesHandle');
+    if (handle) {
+      const perm = await handle.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        STATE.autoSave = { enabled: true, handle };
+  updateAutoSaveStatusUI();
+      }
+    }
+  } catch {}
+}
+
+let autoSaveTimer = null;
+function scheduleAutoSaveRules() {
+  if (!STATE.autoSave.enabled || !STATE.autoSave.handle) return;
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(async () => {
+    try {
+      const writable = await STATE.autoSave.handle.createWritable();
+  const payload = { version: 2, exportedAt: new Date().toISOString(), regras: STATE.regras || {} };
+      await writable.write(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+      await writable.close();
+      setStatus('Regras salvas automaticamente.');
+    } catch (e) {
+      console.warn('Falha no auto-save:', e);
+      setStatus('Falha ao salvar automaticamente. Verifique permissões.');
+    }
+  }, 400); // debounce
+}
+
+function updateAutoSaveStatusUI() {
+  const statusEls = [
+    document.getElementById('auto-save-status'),
+    document.getElementById('auto-save-status-2')
+  ].filter(Boolean);
+  const btns = [
+    document.getElementById('btn-setup-auto-save'),
+    document.getElementById('btn-setup-auto-save-2')
+  ].filter(Boolean);
+  // Suporte
+  if (!FS_SUPPORT) {
+    btns.forEach(b => b.disabled = true);
+    statusEls.forEach(el => { el.textContent = 'Auto-save indisponível'; el.className = 'badge badge-geral'; });
+    return;
+  }
+  const active = !!(STATE.autoSave.enabled && STATE.autoSave.handle);
+  btns.forEach(b => b.disabled = active ? true : false);
+  statusEls.forEach(el => {
+    if (active) { el.textContent = 'Auto-save ativo'; el.className = 'badge badge-sugerido'; }
+    else { el.textContent = 'Auto-save inativo'; el.className = 'badge'; }
+  });
+}
+
+// Migração e helpers de regras: de score único para contadores por rótulo
+function migrateRegrasInPlace() {
+  const regras = STATE.regras || {};
+  let changed = false;
+  for (const [k, r] of Object.entries(regras)) {
+    if (!r) continue;
+    if (typeof r.score === 'number' && r.divisao) {
+      const counts = { Geral: 0, Exclusiva: 0 };
+      counts[r.divisao] = r.score;
+      regras[k] = { divisao: r.divisao, counts, lastUpdated: r.lastUpdated || new Date().toISOString() };
+      changed = true;
+    } else if (!r.counts) {
+      regras[k] = { divisao: r.divisao || 'Geral', counts: { Geral: 0, Exclusiva: 0 }, lastUpdated: r.lastUpdated || new Date().toISOString() };
+      changed = true;
+    }
+  }
+  if (changed) savePrefs();
+}
+
+function ensureRule(key) {
+  if (!STATE.regras[key]) STATE.regras[key] = { divisao: 'Geral', counts: { Geral: 0, Exclusiva: 0 }, lastUpdated: new Date().toISOString() };
+  if (!STATE.regras[key].counts) STATE.regras[key].counts = { Geral: 0, Exclusiva: 0 };
+  return STATE.regras[key];
 }
 
 // Banco detection heuristics (diacritic-insensitive + filename hints)
@@ -146,11 +290,52 @@ async function extractTextFromPDF(file) {
   return { text: fullText, pages: pdf.numPages, rows: allRows };
 }
 
+// Pré-processamento específico para Itaú: divide linhas que contêm múltiplas datas
+// Em faturas Itaú, a seção "Lançamentos: compras e saques" pode vir em duas colunas.
+// Esta função detecta múltiplas datas na mesma linha e a quebra em segmentos por lançamento.
+function itauPreprocessRows(rows = []) {
+  const out = [];
+  // Datas no formato DD/MM ou DD/MM/AA(AA), e também "DD mon" (abr pt-BR)
+  const reDateToken = /(?:^|\s)(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez))/ig;
+  
+  for (const raw of rows) {
+    const line = String(raw || '').trim();
+    if (!line) continue;
+    
+    // Detectar múltiplas datas na mesma linha (problema de duas colunas)
+    const indices = [];
+    reDateToken.lastIndex = 0;
+    let m;
+    while ((m = reDateToken.exec(line)) !== null) {
+      const span = m[0];
+      const offset = span.startsWith(' ') ? 1 : 0;
+      indices.push(m.index + offset);
+      if (reDateToken.lastIndex <= m.index) reDateToken.lastIndex = m.index + 1;
+    }
+    
+    // Se há múltiplas datas, provavelmente é uma linha onde duas colunas foram concatenadas
+    if (indices.length >= 2) {
+      // Quebrar em segmentos por data
+      for (let i = 0; i < indices.length; i++) {
+        const start = indices[i];
+        const end = indices[i + 1] ?? line.length;
+        const seg = line.slice(start, end).replace(/\s{2,}/g, ' ').trim();
+        if (seg) out.push(seg);
+      }
+    } else {
+      // Linha normal, manter como está
+      out.push(line);
+    }
+  }
+  
+  return out;
+}
+
 // Parsers por banco (heurística inicial simples)
 function parseTransacoesGeneric(text, banco) {
   // Heurística 1: linhas únicas com data + descrição + valor
   // Use linhas reconstruídas quando houver; fallback para separar por \n
-  const lines = (Array.isArray(text?.rows) ? text.rows : String(text || '').split(/\n+/))
+  let lines = (Array.isArray(text?.rows) ? text.rows : String(text || '').split(/\n+/))
     .map(l => (typeof l === 'string' ? l.trim() : '')).filter(Boolean);
   const trans = [];
 
@@ -164,7 +349,7 @@ function parseTransacoesGeneric(text, banco) {
   const reParc= /(\b\d{1,2})\s*\/\s*(\d{1,2}\b)/;
   const reCot = /(cot[aã]o|c[aâ]mbio)\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
   const rePagamento = /\b(pagamento|pagto|cr[eé]dito|estorno)\b/i;
-  const reCabecalho = /(resumo|lan[çc]amentos|nacionais em reais|vencimento|fechamento|limite|cart[aã]o|n[ou]mero|cliente|fatura)/i;
+  const reCabecalho = /(resumo|lan[çc]amentos|nacionais em reais|vencimento|fechamento|limite|cart[aã]o|n[ou]mero|cliente|fatura|internacionais)/i;
 
   function isMaskedCardLine(s) {
     // Linhas como 5373.63**.****.8018 ou com muitos asteriscos e dígitos
@@ -244,6 +429,7 @@ function parseTransacoesGeneric(text, banco) {
       banco,
       data: fmtDate(data),
       descricao: desc,
+  local: '',
       descricaoNormalizada: normalizeDesc(desc),
       categoriaTipo,
       divisao: inferDivisaoSugerida(desc),
@@ -264,6 +450,19 @@ function parseTransacoesGeneric(text, banco) {
       // dedupe e retornar já que o parser é específico
       const map = new Map();
       for (const t of amazon) map.set(t.id, t);
+      return [...map.values()];
+    }
+  }
+  
+  // Itaú: usar parser dedicado baseado no texto completo (padrões multilinha)
+  if (banco === 'Itaú' && lines.length) {
+    // Primeiro aplicar pré-processamento para separar colunas misturadas
+    const preprocessedRows = itauPreprocessRows(lines);
+    const itau = parseItauFromText({ text: text?.text || lines.join('\n'), rows: preprocessedRows }, banco);
+    if (itau.length) {
+      // dedupe e retornar
+      const map = new Map();
+      for (const t of itau) map.set(t.id, t);
       return [...map.values()];
     }
   }
@@ -430,6 +629,7 @@ function parseTransacoesAmazon(lines, banco) {
       banco,
       data: fmtDate(data),
       descricao: desc,
+  local: '',
       descricaoNormalizada: normalizeDesc(desc),
       categoriaTipo,
       divisao: inferDivisaoSugerida(desc),
@@ -449,6 +649,385 @@ function parseTransacoesAmazon(lines, banco) {
   return out;
 }
 
+// Parser específico para Itaú - evita concatenação de múltiplas transações
+function parseItauPDF(lines, banco) {
+  const out = [];
+  const reCab = /(^|\b)(lan[çc]amentos(?::\s*compras e saques)?|compras e saques|nacionais em reais|internacionais(?:\s*em\s*reais)?|total dos lan[çc]amentos|subtotal|total\b|total da fatura|pagamentos efetuados|saldo (?:anterior|financiado)|vencimento|fechamento|limite|cart[aã]o|fatura|cliente|resumo)\b/i;
+  const reDateStart = /^(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez))\b/i;
+  const reVALany = /R?\$?\s*\(?-?\s*\d+(?:[\.,]\d{3})*[\.,]\d{2}\)?\s*-?/g;
+  const reUSD = /(US\$|USD)\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
+  const reCot = /(cot[aã]o|c[aâ]mbio)\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2,4})/i; // aceita 2-4 decimais
+  const reParc = /(\b\d{1,2})\s*\/\s*(\d{1,2}\b)/;
+  const reIOF = /iof[^\d]*(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})/i;
+
+  function isResumoTotal(s) {
+    const n = normalizeDesc(s);
+    if (!n) return true;
+    // Começam com rótulos de somatórios/seções
+    if (/^(total|subtotal|total dos lancamentos|resumo|nacionais em reais|internacionais|compras e saques)\b/i.test(n)) return true;
+    // Indicadores globais da fatura
+    if (/(valor total|total da fatura|total a pagar|saldo (anterior|financiado)|pagamentos efetuados|pagamento minimo|minimo|encargos|juros|anuidade)/i.test(n)) return true;
+    // Linhas curtas com "total ..." geralmente são somatórios
+    if (/\btotal\b/.test(n) && n.split(' ').length <= 5) return true;
+    return false;
+  }
+
+  function parseValor(str) {
+    const raw = String(str);
+    const s = raw.replace(/[^0-9.,()\-]/g, '');
+    const trimmed = s.trim();
+    const neg = trimmed.includes('-') || (trimmed.startsWith('(') && trimmed.endsWith(')')) || /-\s*$/.test(raw);
+    let core = trimmed.replace(/[()\-]/g, '');
+    const lastComma = core.lastIndexOf(',');
+    const lastDot = core.lastIndexOf('.');
+    let dec = null;
+    if (lastComma !== -1 || lastDot !== -1) {
+      dec = (lastComma > lastDot) ? ',' : (lastDot > lastComma ? '.' : null);
+    }
+    if (dec) {
+      const thou = dec === ',' ? /\./g : /,/g;
+      core = core.replace(thou, '').replace(dec, '.');
+    }
+    const num = parseFloat(core) || 0;
+    return neg ? -num : num;
+  }
+
+  // Se ainda restou linha com mais de uma data, quebre novamente
+  function splitByDates(line) {
+    const parts = [];
+    const s = String(line || '').trim();
+    if (!s) return parts;
+    // colete inícios de datas
+    const idxs = [];
+  const reAllDates = new RegExp(reDateStart.source, 'ig');
+    let m;
+    while ((m = reAllDates.exec(s)) !== null) {
+      idxs.push(m.index);
+      if (reAllDates.lastIndex <= m.index) reAllDates.lastIndex = m.index + 1;
+    }
+    if (idxs.length <= 1) return [s];
+    for (let i = 0; i < idxs.length; i++) {
+      const start = idxs[i];
+      const end = idxs[i + 1] ?? s.length;
+      const seg = s.slice(start, end).replace(/\s{2,}/g, ' ').trim();
+      if (seg) parts.push(seg);
+    }
+    return parts;
+  }
+
+  function processSegment(seg) {
+    let line = String(seg || '').trim();
+    if (!line) return null;
+    if (reCab.test(line) || isResumoTotal(line)) return null;
+
+    // Data
+  const dm = line.match(reDateStart);
+    if (!dm) return null;
+    const dateStr = dm[0];
+    const data = parseDate(dateStr);
+    if (!data) return null;
+
+    // USD, Cotação, IOF, Parcelas
+    const usdM = line.match(reUSD);
+    const cotM = line.match(reCot);
+    const iofM = line.match(reIOF);
+    const parcM = line.match(reParc);
+    const valorUSD = usdM ? parseValor(usdM[2]) : '';
+    const cotacao = cotM ? cotM[2] : '';
+    const taxas = iofM ? `IOF ${iofM[1]}` : '';
+    const parcelamento = parcM ? `${parcM[1]}/${parcM[2]}` : '';
+
+    // Valor BRL: pegue o último número monetário que NÃO pertença ao token USD
+    const allVals = [...line.matchAll(reVALany)];
+    let valorBRL = null;
+    if (allVals.length) {
+      for (let i = allVals.length - 1; i >= 0; i--) {
+        const m = allVals[i];
+        const start = m.index ?? 0;
+        const end = start + m[0].length;
+        const around = line.slice(Math.max(0, start - 6), Math.min(line.length, end + 6));
+        if (/US\$|USD/.test(around)) continue; // provavelmente USD
+        valorBRL = parseValor(m[0]);
+        break;
+      }
+    }
+    if (valorBRL == null) return null;
+
+    // Descrição: remova data, tokens de valor e palavras-chave técnicas
+    let desc = line
+      .replace(reDateStart, '')
+      .replace(reUSD, '')
+      .replace(reCot, '')
+      .replace(reIOF, '')
+      .replace(reParc, '')
+      .replace(reVALany, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  desc = cleanDescricao(desc, banco);
+  if (!desc) return null;
+  // Rótulos e somatórios não são lançamentos
+  const reLabelOnly = /^(total|subtotal|total dos lancamentos|resumo|nacionais em reais|internacionais|compras e saques|valor total|total da fatura|total a pagar|saldo (?:anterior|financiado)|pagamentos efetuados|pagamento minimo|minimo|encargos|juros|anuidade)\b/i;
+  if (reLabelOnly.test(desc)) return null;
+  if (isResumoTotal(desc)) return null;
+
+    // Categoria/ajustes de sinal (pagamento/estorno)
+    let categoriaTipo = inferCategoria(desc);
+    let observacoes = '';
+    const isNegative = Number(valorBRL) < 0;
+    if (categoriaTipo === 'Pagamento/Crédito' || isNegative) {
+      categoriaTipo = 'Pagamento/Crédito';
+      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
+      else if (/estorno|chargeback/i.test(desc) || isNegative) observacoes = 'Estorno';
+    }
+    const abs = Math.abs(Number(valorBRL));
+    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
+
+    return {
+      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
+      banco,
+      data: fmtDate(data),
+      descricao: desc,
+      descricaoNormalizada: normalizeDesc(desc),
+      categoriaTipo,
+      divisao: inferDivisaoSugerida(desc),
+      valorBRL: valorAdj,
+      valorUSD: valorUSD || '',
+      cotacao: cotacao || '',
+      taxas: taxas || '',
+      parcelamento: parcelamento || '',
+      observacoes
+    };
+  }
+
+  for (const raw of lines) {
+    const parts = splitByDates(raw);
+    for (const seg of parts) {
+      const t = processSegment(seg);
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+
+// Parser Itaú por texto integral: casa transações nacionais (2 linhas) e internacionais (3 linhas)
+// com proteção contra mistura de colunas usando lookahead
+function parseItauFromText(result, banco) {
+  const out = [];
+  const full = String(result?.text || '');
+  if (!full.trim()) return out;
+
+  // Normalizar quebras de linha: remover espaços à direita para ancoragens corretas
+  const text = full.replace(/[ \t]+$/gm, '');
+
+  // Regex unificado para capturar transações nacionais (2 linhas) e internacionais (3 linhas)
+  // com proteção contra mistura de colunas usando lookahead negativo.
+  // A flag 'm' (multiline) permite que ^ ancore no início de cada linha.
+  // A flag 'i' (case-insensitive) ajuda com variações como "Dólar" vs "dólar".
+  // A flag 'u' (unicode) garante o tratamento correto de caracteres especiais.
+  const reItauTransactions = new RegExp(
+    // Transações nacionais (2 linhas)
+    `^(?<data>\\d{2}\\/\\d{2})\\s+` +
+    `(?<estabelecimento_nacional>.+?)\\s+` +
+    `(?<valor_reais_nacional>\\d{1,3}(?:\\.\\d{3})*,\\d{2})\\r?\\n` +
+    `(?<categoria_nacional>[A-ZÇÃÉÊÓÚ\\s\\.]+)\\.(?<cidade_nacional>[A-Z\\s]+)` +
+    `(?=(?:\\r?\\n(?!\\d{2}\\/\\d{2})))` + // Lookahead: evita quebra por nova data prematura
+    `|` + // OU
+    // Transações internacionais (3 linhas)
+    `^(?<data_int>\\d{2}\\/\\d{2})\\s+` +
+    `(?<estabelecimento_int>.+?)\\s+` +
+    `(?<valor_reais_int>\\d{1,3}(?:\\.\\d{3})*,\\d{2})\\r?\\n` +
+    `(?<local_int>.+?)\\s+` +
+    `(?<valor_usd>\\d+,\\d{2})\\s+USD\\r?\\n` +
+    `Dólar\\s+de\\s+Conversão\\s+R\\$\\s*(?<cotacao_dolar>\\d+,\\d{2})` +
+    `(?=(?:\\r?\\n(?!\\d{2}\\/\\d{2})))`, // Lookahead: evita quebra por nova data prematura
+    'gmiu'
+  );
+
+  function parseValorBR(str) {
+    const s = String(str || '').replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+
+  function isValidTransaction(desc, categoria, cidade) {
+    // Filtrar cabeçalhos e ruídos comuns
+    const descLower = (desc || '').toLowerCase();
+    const catLower = (categoria || '').toLowerCase();
+    
+    // Pular cabeçalhos conhecidos
+    if (/^(lançamentos|compras e saques|nacionais em reais|internacionais|resumo|total|subtotal)/i.test(descLower)) {
+      return false;
+    }
+    
+    // Pular linhas com informações de cartão mascarado
+    if (/\*{2,}/.test(desc) && /\d{4}/.test(desc)) {
+      return false;
+    }
+    
+    // Pular totais e somatórios
+    if (/^(total|subtotal|valor total|saldo)/i.test(descLower)) {
+      return false;
+    }
+    
+    return true;
+  }
+
+  function pushTransaction(dataStr, estabelecimento, valorBRL, extras = {}) {
+    const data = parseDate(dataStr);
+    if (!data) return;
+    
+    let desc = cleanDescricao(estabelecimento, banco);
+    if (!desc) return;
+    
+    // Validar se é uma transação válida (não é cabeçalho ou ruído)
+    if (!isValidTransaction(desc, extras.categoria, extras.local)) return;
+    
+    const place = (extras.local || '').toString().trim();
+    
+    // Classificação
+    let categoriaTipo = inferCategoria(desc);
+    const isNegative = Number(valorBRL) < 0;
+    let observacoes = '';
+    
+    if (categoriaTipo === 'Pagamento/Crédito' || isNegative) {
+      categoriaTipo = 'Pagamento/Crédito';
+      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
+      else if (/estorno|chargeback/i.test(desc) || isNegative) observacoes = 'Estorno';
+    }
+    
+    const abs = Math.abs(Number(valorBRL));
+    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
+    
+    out.push({
+      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
+      banco,
+      data: fmtDate(data),
+      descricao: desc,
+      local: place,
+      descricaoNormalizada: normalizeDesc(desc),
+      categoriaTipo,
+      divisao: inferDivisaoSugerida(desc),
+      valorBRL: valorAdj,
+      valorUSD: extras.valorUSD ?? '',
+      cotacao: extras.cotacao ?? '',
+      taxas: extras.taxas ?? '',
+      parcelamento: extras.parcelamento ?? '',
+      observacoes
+    });
+  }
+
+  // Processar matches com o regex unificado
+  let match;
+  while ((match = reItauTransactions.exec(text)) !== null) {
+    const groups = match.groups;
+    
+    if (groups.data && groups.estabelecimento_nacional && groups.valor_reais_nacional) {
+      // Transação nacional (2 linhas)
+      const dataStr = groups.data;
+      const estabelecimento = groups.estabelecimento_nacional;
+      const valorStr = groups.valor_reais_nacional;
+      const categoria = groups.categoria_nacional || '';
+      const cidade = groups.cidade_nacional || '';
+      
+      const valor = parseValorBR(valorStr);
+      if (valor != null) {
+        pushTransaction(dataStr, estabelecimento, valor, { 
+          categoria, 
+          local: cidade,
+          tipo: 'nacional'
+        });
+      }
+    } else if (groups.data_int && groups.estabelecimento_int && groups.valor_reais_int) {
+      // Transação internacional (3 linhas)
+      const dataStr = groups.data_int;
+      const estabelecimento = groups.estabelecimento_int;
+      const valorStr = groups.valor_reais_int;
+      const local = groups.local_int || '';
+      const valorUSDStr = groups.valor_usd || '';
+      const cotacaoStr = groups.cotacao_dolar || '';
+      
+      const valor = parseValorBR(valorStr);
+      const valorUSD = parseValorBR(valorUSDStr);
+      
+      if (valor != null) {
+        pushTransaction(dataStr, estabelecimento, valor, {
+          local,
+          valorUSD,
+          cotacao: cotacaoStr,
+          tipo: 'internacional'
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// Função de teste para validar o parser do Itaú com casos problemáticos
+function testItauParser() {
+  // Casos de teste simulando problemas de duas colunas
+  const testCases = [
+    {
+      name: "Transação nacional simples",
+      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
+ALIMENTAÇÃO .TRES RIOS`
+    },
+    {
+      name: "Transação internacional simples", 
+      text: `15/07  GOOGLE *CHROME            29,55
+650-253-0000   5,00   USD
+Dólar de Conversão R$ 5,91`
+    },
+    {
+      name: "Problema de duas colunas - nacional + nacional",
+      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
+ALIMENTAÇÃO .TRES RIOS 20/07  SUPREME PANIFICADORA T 45,40
+ALIMENTAÇÃO .TRES RIOS`
+    },
+    {
+      name: "Problema de duas colunas - nacional + internacional", 
+      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
+ALIMENTAÇÃO .TRES RIOS 15/07  GOOGLE *CHROME            29,55
+650-253-0000   5,00   USD
+Dólar de Conversão R$ 5,91`
+    },
+    {
+      name: "Múltiplas transações válidas",
+      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
+ALIMENTAÇÃO .TRES RIOS
+
+20/07  SUPREME PANIFICADORA T    45,40  
+ALIMENTAÇÃO .TRES RIOS
+
+15/07  GOOGLE *CHROME            29,55
+650-253-0000   5,00   USD
+Dólar de Conversão R$ 5,91`
+    }
+  ];
+
+  console.log('🔍 Testando parser Itaú melhorado...');
+  
+  for (const testCase of testCases) {
+    console.log(`\n📝 Teste: ${testCase.name}`);
+    console.log('Entrada:', testCase.text.replace(/\n/g, '\\n'));
+    
+    const result = parseItauFromText({ text: testCase.text }, 'Itaú');
+    console.log(`Transações encontradas: ${result.length}`);
+    
+    for (const trans of result) {
+      console.log(`  - ${trans.data} | ${trans.descricao} | R$ ${trans.valorBRL}`);
+      if (trans.valorUSD) console.log(`    USD: ${trans.valorUSD} | Cotação: ${trans.cotacao}`);
+    }
+  }
+  
+  return testCases.length;
+}
+
+// Expor função de teste no console para debugging
+window.testItauParser = testItauParser;
+
+// Fallback tolerante por linhas: detecta blocos nacionais (2 linhas) e internacionais (3-4 linhas)
+// parseItauFromLines removido: voltamos ao parser único por texto com lookaheads contra mistura de colunas
 function inferCategoria(desc) {
   const s = normalizeDesc(desc);
   if (/\b(pagamento|pagamentos|pagto|credito|creditos|cr[eé]dito|cr[eé]ditos|estorno|estornos|chargeback)\b/.test(s)) return 'Pagamento/Crédito';
@@ -482,10 +1061,25 @@ function aplicarAprendizado(t) {
 }
 
 function confirmarDivisao(transacao, escolha) {
+  // Atualiza a UI do item atual
   transacao.divisao = escolha; // persistir escolha limpa
   const key = transacao.descricaoNormalizada;
-  STATE.regras[key] = { divisao: escolha, score: 1 };
+  const rule = ensureRule(key);
+  // Ajustar contadores com base na última decisão desta transação
+  const decKey = transacao.id;
+  const prevDecision = STATE.decisions[decKey]?.divisao;
+  if (prevDecision && rule.counts[prevDecision] != null) {
+    rule.counts[prevDecision] = Math.max(0, (rule.counts[prevDecision] || 0) - 1);
+  }
+  rule.counts[escolha] = (rule.counts[escolha] || 0) + 1;
+  // Maioria decide; empate favorece a última escolha
+  const g = rule.counts.Geral || 0;
+  const e = rule.counts.Exclusiva || 0;
+  rule.divisao = (g === e) ? escolha : (g > e ? 'Geral' : 'Exclusiva');
+  rule.lastUpdated = new Date().toISOString();
+  STATE.decisions[decKey] = { key, divisao: escolha };
   savePrefs();
+  scheduleAutoSaveRules();
 }
 
 // Filtros e ordenação
@@ -561,9 +1155,13 @@ function renderTable() {
   const data = applyFiltersSort();
   const pagamentos = data.filter(t => t.categoriaTipo === 'Pagamento/Crédito');
   const despesas = data.filter(t => t.categoriaTipo !== 'Pagamento/Crédito');
+  // separar exclusivas
+  const isExc = (t) => t.divisao.replace(' (sugerido)','') === 'Exclusiva';
+  const despesasExclusivas = despesas.filter(isExc);
+  const despesasGerais = despesas.filter(t => !isExc(t));
 
   let idx = 1;
-  for (const t of despesas) {
+  for (const t of despesasGerais) {
     const tr = document.createElement('tr');
 
     const mk = (text, cls) => {
@@ -577,7 +1175,8 @@ function renderTable() {
     tr.appendChild(mk(String(idx++), 'right index-col'));
     tr.appendChild(mk(t.data));
     tr.appendChild(mk(t.banco));
-    tr.appendChild(mk(t.descricao));
+  tr.appendChild(mk(t.descricao));
+  tr.appendChild(mk(t.local || ''));
     tr.appendChild(mk(t.categoriaTipo));
 
     const tdDiv = document.createElement('td');
@@ -614,7 +1213,7 @@ function renderTable() {
     tr.appendChild(mk(t.parcelamento));
     tr.appendChild(mk(t.observacoes));
 
-    body.appendChild(tr);
+  body.appendChild(tr);
   }
 
   // pagamentos/estornos em tabela separada
@@ -628,6 +1227,7 @@ function renderTable() {
     tr.appendChild(mk(p.data));
     tr.appendChild(mk(p.banco));
     tr.appendChild(mk(p.descricao));
+  tr.appendChild(mk(p.local || ''));
     tr.appendChild(mk(p.categoriaTipo));
     tr.appendChild(mk(p.valorBRL != null && p.valorBRL !== '' ? p.valorBRL.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
     tr.appendChild(mk(p.observacoes || ''));
@@ -635,6 +1235,67 @@ function renderTable() {
   }
   const legend = document.getElementById('legend-pag-count');
   if (legend) legend.textContent = pagamentos.length ? `${pagamentos.length} registros` : 'Nenhum registro';
+
+  // render tabela de Exclusivas
+  const excBody = document.getElementById('tabela-exc-body');
+  if (excBody) {
+    excBody.innerHTML = '';
+    let eidx = 1;
+    for (const t of despesasExclusivas) {
+      const tr = document.createElement('tr');
+      const mk = (text, cls) => {
+        const td = document.createElement('td');
+        if (cls) td.className = cls;
+        td.textContent = text ?? '';
+        return td;
+      };
+
+      tr.appendChild(mk(String(eidx++), 'right index-col'));
+      tr.appendChild(mk(t.data));
+      tr.appendChild(mk(t.banco));
+  tr.appendChild(mk(t.descricao));
+  tr.appendChild(mk(t.local || ''));
+      tr.appendChild(mk(t.categoriaTipo));
+
+      const tdDiv = document.createElement('td');
+      tdDiv.className = 'cell-divisao';
+      const select = document.createElement('select');
+      const opts = ['Geral', 'Exclusiva'];
+      for (const o of opts) {
+        const opt = document.createElement('option');
+        opt.value = o;
+        opt.textContent = o;
+        select.appendChild(opt);
+      }
+      const cleanVal = t.divisao.replace(' (sugerido)','');
+      select.value = cleanVal;
+      if (t.divisao.endsWith('(sugerido)')) {
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-sugerido';
+        badge.style.marginLeft = '6px';
+        badge.textContent = 'Sugerido';
+        tdDiv.appendChild(badge);
+      }
+      select.addEventListener('change', () => {
+        confirmarDivisao(t, select.value);
+        recalcSummary();
+        renderTable();
+      });
+      tdDiv.prepend(select);
+      tr.appendChild(tdDiv);
+
+      tr.appendChild(mk(t.valorBRL != null && t.valorBRL !== '' ? t.valorBRL.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
+      tr.appendChild(mk(t.valorUSD !== '' ? Number(t.valorUSD).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', 'right'));
+      tr.appendChild(mk(t.cotacao !== '' ? String(t.cotacao) : '', 'right'));
+      tr.appendChild(mk(t.taxas));
+      tr.appendChild(mk(t.parcelamento));
+      tr.appendChild(mk(t.observacoes));
+
+      excBody.appendChild(tr);
+    }
+    const legendExc = document.getElementById('legend-exc-count');
+    if (legendExc) legendExc.textContent = despesasExclusivas.length ? `${despesasExclusivas.length} registros` : 'Nenhum registro';
+  }
 
   // habilita export se há dados
   const has = STATE.transacoes.length > 0;
@@ -651,7 +1312,7 @@ function updateBancoFiltroOptions() {
 
 // CSV/XLSX export
 function exportCSV() {
-  const rows = [['Data','Banco/Cartão','Descrição','Categoria','Divisão','Valor R$','Valor USD','Cotação','Taxas','Parcelamento','Observações']];
+  const rows = [['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','Taxas','Parcelamento','Observações']];
   const all = applyFiltersSort();
   const despesas = all.filter(t => t.categoriaTipo !== 'Pagamento/Crédito');
   const pagamentos = all.filter(t => t.categoriaTipo === 'Pagamento/Crédito');
@@ -660,6 +1321,7 @@ function exportCSV() {
       t.data,
       t.banco,
       t.descricao,
+      t.local || '',
       t.categoriaTipo,
       t.divisao.replace(' (sugerido)',''),
       (Number(t.valorBRL)||0).toFixed(2).replace('.',','),
@@ -692,6 +1354,7 @@ function exportXLSX() {
     Data: t.data,
     'Banco/Cartão': t.banco,
     Descrição: t.descricao,
+    Local: t.local || '',
     Categoria: t.categoriaTipo,
     Divisão: t.divisao.replace(' (sugerido)',''),
     'Valor R$': Number(t.valorBRL)||0,
@@ -705,6 +1368,63 @@ function exportXLSX() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Transacoes');
   XLSX.writeFile(wb, 'transacoes.xlsx');
+}
+
+// Import/Export de regras (aprendizado) em JSON portátil
+function exportRegrasJSON() {
+  const payload = {
+  version: 2,
+    exportedAt: new Date().toISOString(),
+    regras: STATE.regras || {}
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'regras_divisao.json'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importRegrasJSON(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      try {
+        const text = String(reader.result || '');
+        const obj = JSON.parse(text);
+        const incomingRaw = obj && (obj.regras || obj);
+        if (!incomingRaw || typeof incomingRaw !== 'object') throw new Error('Arquivo inválido');
+        const incoming = {};
+        for (const [k, r] of Object.entries(incomingRaw)) {
+          if (!r) continue;
+          if (typeof r.score === 'number' && r.divisao) {
+            // v1 -> v2
+            const counts = { Geral: 0, Exclusiva: 0 };
+            counts[r.divisao] = r.score;
+            incoming[k] = { divisao: r.divisao, counts, lastUpdated: r.lastUpdated || new Date().toISOString() };
+          } else {
+            incoming[k] = {
+              divisao: r.divisao || 'Geral',
+              counts: (r.counts && typeof r.counts === 'object') ? { Geral: r.counts.Geral || 0, Exclusiva: r.counts.Exclusiva || 0 } : { Geral: 0, Exclusiva: 0 },
+              lastUpdated: r.lastUpdated || new Date().toISOString()
+            };
+          }
+        }
+        // mesclar (importadas prevalecem)
+        STATE.regras = { ...(STATE.regras || {}), ...incoming };
+        savePrefs();
+        // re-aplicar sugestão às transações carregadas
+        for (const t of STATE.transacoes) {
+          const key = t.descricaoNormalizada;
+          if (STATE.regras[key]) t.divisao = STATE.regras[key].divisao + ' (sugerido)';
+        }
+        renderTable();
+        scheduleAutoSaveRules();
+        resolve();
+      } catch (e) { reject(e); }
+    };
+    reader.readAsText(file);
+  });
 }
 
 // Handlers UI
@@ -769,22 +1489,59 @@ function initUI() {
 
   document.getElementById('btn-export-csv').addEventListener('click', exportCSV);
   document.getElementById('btn-export-xlsx').addEventListener('click', exportXLSX);
+  const btnExpReg = document.getElementById('btn-export-regras');
+  if (btnExpReg) btnExpReg.addEventListener('click', exportRegrasJSON);
+  const inpImpReg = document.getElementById('input-import-regras');
+  if (inpImpReg) inpImpReg.addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setStatus('Importando regras...');
+    try {
+      await importRegrasJSON(f);
+      setStatus('Regras importadas com sucesso.');
+    } catch (err) {
+      console.error(err);
+      setStatus('Falha ao importar regras: ' + (err?.message || err));
+    } finally {
+      e.target.value = '';
+    }
+  });
+  const btnAuto = document.getElementById('btn-setup-auto-save');
+  if (btnAuto) btnAuto.addEventListener('click', async () => {
+    try {
+      await setupAutoSaveHandle();
+      // salva imediatamente o estado atual
+      scheduleAutoSaveRules();
+    } catch (e) {
+      setStatus(e?.message || String(e));
+    }
+  });
+  const btnAuto2 = document.getElementById('btn-setup-auto-save-2');
+  if (btnAuto2) btnAuto2.addEventListener('click', async () => {
+    try {
+      await setupAutoSaveHandle();
+      scheduleAutoSaveRules();
+    } catch (e) { setStatus(e?.message || String(e)); }
+  });
   document.getElementById('btn-limpar').addEventListener('click', () => {
     if (!confirm('Limpar dados, filtros e regras salvas?')) return;
     STATE.transacoes = [];
     STATE.regras = {};
+  STATE.decisions = {};
     STATE.filters = { banco: '', texto: '', dataInicio: '', dataFim: '', divisao: '' };
     localStorage.removeItem(LS_KEYS.data);
     localStorage.removeItem(LS_KEYS.rules);
     localStorage.removeItem(LS_KEYS.filters);
+  localStorage.removeItem(LS_KEYS.decisions);
     setStatus('Dados limpos.');
     updateBancoFiltroOptions();
     recalcSummary();
     renderTable();
+  scheduleAutoSaveRules();
   });
 
-  // ordenar colunas
-  document.querySelectorAll('#tabela thead th.sortable').forEach(th => {
+  // ordenar colunas (todas as tabelas com th.sortable)
+  document.querySelectorAll('.data-table thead th.sortable').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.getAttribute('data-key');
       if (STATE.sort.key === key) STATE.sort.dir = (STATE.sort.dir === 'asc' ? 'desc' : 'asc');
@@ -802,8 +1559,11 @@ function initUI() {
   document.getElementById('filtro-divisao').value = STATE.filters.divisao;
 
   // estado inicial
+  migrateRegrasInPlace();
+  loadAutoSaveHandle();
   recalcSummary();
   renderTable();
+  updateAutoSaveStatusUI();
 }
 
 window.addEventListener('DOMContentLoaded', initUI);

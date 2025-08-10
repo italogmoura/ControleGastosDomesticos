@@ -246,814 +246,75 @@ function detectBanco(text, filename='') {
   return 'Desconhecido';
 }
 
-// PDF parsing
-async function extractTextFromPDF(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  // Desabilita o worker para funcionar via file:// sem problemas de CORS
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableWorker: true, useWorkerFetch: false }).promise;
-  let fullText = '';
-  const allRows = [];
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const items = content.items || [];
-    const strings = items.map(it => it.str);
-    fullText += strings.join('\n') + '\n';
-
-    // Agrupar por Y aproximado para reconstruir linhas visuais
-    const rowsMap = [];
-    const tolY = 2.5; // tolerância de Y
-    const points = items.map(it => ({
-      x: (it.transform && typeof it.transform[4] === 'number') ? it.transform[4] : 0,
-      y: (it.transform && typeof it.transform[5] === 'number') ? it.transform[5] : 0,
-      t: it.str
-    })).filter(p => p.t && p.t.trim());
-    // ordenar por y desc (topo->baixo dependendo do sistema), e x asc depois por linha
-    points.sort((a,b) => {
-      if (Math.abs(b.y - a.y) > tolY) return b.y - a.y; // y
-      return a.x - b.x; // x
-    });
-    for (const p of points) {
-      // encontrar grupo por y
-      let grp = rowsMap.find(r => Math.abs(r.y - p.y) <= tolY);
-      if (!grp) { grp = { y: p.y, cells: [] }; rowsMap.push(grp); }
-      grp.cells.push(p);
-    }
-    // ordenar grupos por y invertido (crescente visual) e cells por x
-    rowsMap.sort((a,b) => b.y - a.y);
-    for (const r of rowsMap) {
-      r.cells.sort((a,b) => a.x - b.x);
-      const line = r.cells.map(c => c.t).join(' ').replace(/\s{2,}/g,' ').trim();
-      if (line) allRows.push(line);
-    }
-  }
-  return { text: fullText, pages: pdf.numPages, rows: allRows };
+// Ingestão de JSON estruturado (novo fluxo)
+async function readJSONFile(file) {
+  const text = await file.text();
+  try { return JSON.parse(text); } catch (e) { throw new Error(`JSON inválido em ${file.name}`); }
 }
 
-// Pré-processamento específico para Itaú: divide linhas que contêm múltiplas datas
-// Em faturas Itaú, a seção "Lançamentos: compras e saques" pode vir em duas colunas.
-// Esta função detecta múltiplas datas na mesma linha e a quebra em segmentos por lançamento.
-function itauPreprocessRows(rows = []) {
+// Removidos pré-processamentos/parsings de PDF – fluxo agora é 100% via JSON
+
+// Converte JSON padronizado para o formato interno do app
+function mapJsonToTransactions(json, filename = '') {
   const out = [];
-  // Datas no formato DD/MM ou DD/MM/AA(AA), e também "DD mon" (abr pt-BR)
-  const reDateToken = /(?:^|\s)(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez))/ig;
-  
-  for (const raw of rows) {
-    const line = String(raw || '').trim();
-    if (!line) continue;
-    
-    // Detectar múltiplas datas na mesma linha (problema de duas colunas)
-    const indices = [];
-    reDateToken.lastIndex = 0;
-    let m;
-    while ((m = reDateToken.exec(line)) !== null) {
-      const span = m[0];
-      const offset = span.startsWith(' ') ? 1 : 0;
-      indices.push(m.index + offset);
-      if (reDateToken.lastIndex <= m.index) reDateToken.lastIndex = m.index + 1;
-    }
-    
-    // Se há múltiplas datas, provavelmente é uma linha onde duas colunas foram concatenadas
-    if (indices.length >= 2) {
-      // Quebrar em segmentos por data
-      for (let i = 0; i < indices.length; i++) {
-        const start = indices[i];
-        const end = indices[i + 1] ?? line.length;
-        const seg = line.slice(start, end).replace(/\s{2,}/g, ' ').trim();
-        if (seg) out.push(seg);
-      }
-    } else {
-      // Linha normal, manter como está
-      out.push(line);
-    }
-  }
-  
-  return out;
-}
-
-// Parsers por banco (heurística inicial simples)
-function parseTransacoesGeneric(text, banco) {
-  // Heurística 1: linhas únicas com data + descrição + valor
-  // Use linhas reconstruídas quando houver; fallback para separar por \n
-  let lines = (Array.isArray(text?.rows) ? text.rows : String(text || '').split(/\n+/))
-    .map(l => (typeof l === 'string' ? l.trim() : '')).filter(Boolean);
-  const trans = [];
-
-  const reDMY = /^(\d{2})\/(\d{2})\/(\d{2,4})\b/;
-  const reDM  = /^(\d{2})\/(\d{2})\b/;
-  const reDMon= /^(\d{1,2})\s+(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b/i;
-  // Aceita separador decimal vírgula ou ponto, com ou sem separador de milhar, e hífen à direita
-  const reVAL = /R?\$?\s*\(?-?\s*\d+(?:[\.,]\d{3})*[\.,]\d{2}\)?\s*-?$/; // valor ao final (pode terminar com '-')
-  const reVALany = /R?\$?\s*\(?-?\s*\d+(?:[\.,]\d{3})*[\.,]\d{2}\)?\s*-?/; // valor em qualquer pos (pode ter '-' à direita)
-  const reUSD = /(US\$|USD)\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
-  const reParc= /(\b\d{1,2})\s*\/\s*(\d{1,2}\b)/;
-  const reCot = /(cot[aã]o|c[aâ]mbio)\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
-  const rePagamento = /\b(pagamento|pagto|cr[eé]dito|estorno)\b/i;
-  const reCabecalho = /(resumo|lan[çc]amentos|nacionais em reais|vencimento|fechamento|limite|cart[aã]o|n[ou]mero|cliente|fatura|internacionais)/i;
-
-  function isMaskedCardLine(s) {
-    // Linhas como 5373.63**.****.8018 ou com muitos asteriscos e dígitos
-    return /\*{2,}/.test(s) && /\d/.test(s);
-  }
-
-  function isResumoOuTotal(desc) {
-    const n = normalizeDesc(desc);
-    return /(total a pagar|valor total|total da fatura|saldo|resumo|pagamento minimo|minimo|encargos|juros|anuidade)/.test(n);
-  }
-
-  function parseValor(str) {
-    const raw = String(str);
-    const s = raw.replace(/[^0-9.,()\-]/g,'');
-    const trimmed = s.trim();
-    const neg = trimmed.includes('-') || (trimmed.startsWith('(') && trimmed.endsWith(')')) || /-\s*$/.test(raw);
-    let core = trimmed.replace(/[()\-]/g,'');
-    const lastComma = core.lastIndexOf(',');
-    const lastDot = core.lastIndexOf('.');
-    let dec = null;
-    if (lastComma !== -1 || lastDot !== -1) {
-      dec = (lastComma > lastDot) ? ',' : (lastDot > lastComma ? '.' : null);
-    }
-    if (dec) {
-      const thou = dec === ',' ? /\./g : /,/g;
-      core = core.replace(thou, '').replace(dec, '.');
-    }
-    const num = parseFloat(core) || 0;
-    return neg ? -num : num;
-  }
-
-  function trySingleLine(l) {
-  let data = null;
-    if (reDMY.test(l)) {
-      const m = /^(\d{2})\/(\d{2})\/(\d{2,4})/.exec(l);
-      data = parseDate(m[0]);
-    } else if (reDM.test(l)) {
-      const m = /^(\d{2})\/(\d{2})/.exec(l);
-      data = parseDate(m[0]);
-    } else if (reDMon.test(l)) {
-      const m = reDMon.exec(l);
-      data = parseDate(`${m[1]} ${m[2]}`);
-    }
-    if (!data) return null;
-    if (!reVALany.test(l)) return null;
-    const valMatch = l.match(reVALany);
-  const rawValStr = valMatch[0];
-  const valorBRL = parseValor(rawValStr);
-    // descrição = linha sem data e sem valor no fim
-  let desc = l
-      .replace(/^(\d{2}\/\d{2}(?:\/\d{2,4})?)/,'')
-      .replace(reDMon, '')
-      .replace(valMatch[0], '')
-      .trim()
-      .replace(/\s{2,}/g,' ');
-  desc = cleanDescricao(desc, banco);
-  if (!desc || reCabecalho.test(desc) || isResumoOuTotal(desc) || isMaskedCardLine(l)) return null;
-    let categoriaTipo = inferCategoria(desc);
-    let observacoes = '';
-    const trailingMinus = /-\s*$/.test(rawValStr);
-    const isNegative = valorBRL < 0;
-    if (categoriaTipo === 'Pagamento/Crédito' || trailingMinus || isNegative) {
-      categoriaTipo = 'Pagamento/Crédito';
-      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
-      else if (/estorno|chargeback/i.test(desc) || trailingMinus || isNegative) observacoes = 'Estorno';
-    }
-    const abs = Math.abs(valorBRL);
-    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
-    const usdM = l.match(reUSD);
-    const valorUSD = usdM ? parseValor(usdM[2]) : '';
-    const cotM = l.match(reCot);
-    const cotacao = cotM ? cotM[2] : '';
-    const parcM = l.match(reParc);
-    const parcelamento = parcM ? `${parcM[1]}/${parcM[2]}` : '';
-    return {
-      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
-      banco,
-      data: fmtDate(data),
-      descricao: desc,
-  local: '',
-      descricaoNormalizada: normalizeDesc(desc),
-      categoriaTipo,
-      divisao: inferDivisaoSugerida(desc),
-      valorBRL: valorAdj,
-      valorUSD: valorUSD || '',
-      cotacao: cotacao || '',
-      taxas: '',
-      parcelamento,
-  observacoes
-    };
-  }
-
-  // Passo 1: capturar linhas diretas
-  // Amazon: usar parser dedicado baseado em linhas reconstruídas
-  if (banco === 'Amazon' && lines.length) {
-    const amazon = parseTransacoesAmazon(lines, banco);
-    if (amazon.length) {
-      // dedupe e retornar já que o parser é específico
-      const map = new Map();
-      for (const t of amazon) map.set(t.id, t);
-      return [...map.values()];
-    }
-  }
-  
-  // Itaú: usar parser dedicado baseado no texto completo (padrões multilinha)
-  if (banco === 'Itaú' && lines.length) {
-    // Primeiro aplicar pré-processamento para separar colunas misturadas
-    const preprocessedRows = itauPreprocessRows(lines);
-    const itau = parseItauFromText({ text: text?.text || lines.join('\n'), rows: preprocessedRows }, banco);
-    if (itau.length) {
-      // dedupe e retornar
-      const map = new Map();
-      for (const t of itau) map.set(t.id, t);
-      return [...map.values()];
-    }
-  }
-
-  // Genérico
-  for (const l of lines) {
-    const t = trySingleLine(l);
-    if (t) trans.push(t);
-  }
-
-  // Passo 2: se poucos resultados, tentar janela de proximidade
-  if (trans.length < 3) {
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (reCabecalho.test(l)) continue;
-      // detectar data na linha i
-      let dataStr = null;
-      const dmy = l.match(/^(\d{2}\/\d{2}(?:\/\d{2,4})?)/);
-      const dmon = l.match(reDMon);
-      if (dmy) dataStr = dmy[0];
-      else if (dmon) dataStr = `${dmon[1]} ${dmon[2]}`;
-      if (!dataStr) continue;
-      const data = parseDate(dataStr);
-      // buscar valor nas próximas 1-3 linhas
-      let val = null, jFound = -1, rawValStr = '';
-      for (let j = i; j <= Math.min(i+3, lines.length-1); j++) {
-        const lj = lines[j];
-        const m = lj.match(reVALany);
-        if (m) { rawValStr = m[0]; val = parseValor(m[0]); jFound = j; break; }
-      }
-      if (val == null) continue;
-      // descrição: concat das linhas i..jFound removendo data e valor
-      const descParts = [];
-  for (let k = i; k <= jFound; k++) {
-        let s = lines[k];
-    if (isMaskedCardLine(s)) continue;
-        if (k === i) s = s.replace(/^(\d{2}\/\d{2}(?:\/\d{2,4})?)/,'').replace(reDMon, '').trim();
-        if (k === jFound) s = s.replace(reVALany,'').trim();
-        s = s.replace(/\s{2,}/g,' ').trim();
-        if (s) descParts.push(s);
-      }
-  let desc = descParts.join(' ').trim();
-  desc = cleanDescricao(desc, banco);
-  if (!desc || reCabecalho.test(desc) || isResumoOuTotal(desc)) continue;
-      let categoriaTipo = inferCategoria(desc);
-      let observacoes = '';
-      const trailingMinus = /-\s*$/.test(rawValStr || '');
-      const isNegative = val < 0;
-      if (categoriaTipo === 'Pagamento/Crédito' || trailingMinus || isNegative) {
-        categoriaTipo = 'Pagamento/Crédito';
-        if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
-        else if (/estorno|chargeback/i.test(desc) || trailingMinus || isNegative) observacoes = 'Estorno';
-      }
-      const abs = Math.abs(val);
-      const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
-      // USD/cotação/parcelas na janela
-      let valorUSD = '', cotacao = '', parcelamento = '';
-      for (let k = i; k <= jFound; k++) {
-        const s = lines[k];
-        const um = s.match(reUSD); if (um) valorUSD = parseValor(um[2]);
-        const cm = s.match(reCot); if (cm) cotacao = cm[2];
-        const pm = s.match(reParc); if (pm) parcelamento = `${pm[1]}/${pm[2]}`;
-      }
-      const t = {
-        id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
-        banco,
-        data: fmtDate(data),
-        descricao: desc,
-        descricaoNormalizada: normalizeDesc(desc),
-        categoriaTipo,
-        divisao: inferDivisaoSugerida(desc),
+  if (!json || typeof json !== 'object') return out;
+  const faturas = Array.isArray(json.faturas) ? json.faturas : [];
+  for (const f of faturas) {
+    const idf = f.identificacao || {};
+    const banco = idf.banco || 'Desconhecido';
+    const cartao = idf.cartao || '';
+    const trans = Array.isArray(f.transacoes) ? f.transacoes : [];
+    for (const t of trans) {
+      const dataISO = t.data || '';
+      const d = dataISO ? new Date(dataISO) : null;
+      const data = d && !isNaN(d) ? fmtDate(d) : '';
+      const descricao = cleanDescricao(t.descricao || '', banco);
+      const local = t.local || '';
+      const categoriaRaw = t.categoria || '';
+      const valorBRLnum = Number(t.valorBRL ?? 0);
+      const valorUSDnum = t.valorUSD == null ? '' : Number(t.valorUSD);
+      const cotacao = t.cotacaoDolar == null ? '' : String(t.cotacaoDolar);
+      const taxas = t.taxas == null ? '' : String(t.taxas);
+      const parcelamento = t.parcelamento || '';
+      const observacoes = t.observacoes || '';
+      const categoriaTipo = categoriaRaw || inferCategoria(descricao);
+      const abs = Math.abs(valorBRLnum || 0);
+      // Mantém o sinal vindo do JSON; se for negativo consideramos pagamento/estorno
+      const isNegative = valorBRLnum < 0;
+      const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipo;
+      const valorAdj = isNegative ? -abs : abs;
+      const id = `${banco}${cartao ? ' '+cartao:''}|${data}|${descricao}|${valorAdj}`;
+      out.push({
+        id,
+        banco: cartao ? `${banco} - ${cartao}` : banco,
+        data,
+        descricao,
+        local,
+        descricaoNormalizada: normalizeDesc(descricao),
+        categoriaTipo: categoriaFinal,
+        divisao: inferDivisaoSugerida(descricao),
         valorBRL: valorAdj,
-        valorUSD: valorUSD || '',
-        cotacao: cotacao || '',
-        taxas: '',
-        parcelamento,
+        valorUSD: valorUSDnum === '' ? '' : valorUSDnum,
+        cotacao: cotacao,
+        taxas: taxas,
+        parcelamento: parcelamento,
         observacoes
-      };
-      trans.push(t);
-    }
-  }
-
-  // Dedupe por id
-  const map = new Map();
-  for (const t of trans) map.set(t.id, t);
-  return [...map.values()];
-}
-
-// Parser específico para Amazon utilizando linhas reconstruídas (x/y) e valor no final, frequentemente com hífen à direita
-function parseTransacoesAmazon(lines, banco) {
-  const out = [];
-  const reDMY = /^(\d{2})\/(\d{2})\/(\d{2,4})\b/;
-  const reDM  = /^(\d{2})\/(\d{2})\b/;
-  const reDMon= /^(\d{1,2})\s+(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b/i;
-  const reVALtrail = /R?\$?\s*\(?-?\s*\d+(?:[\.,]\d{3})*[\.,]\d{2}\)?\s*-?$/;
-  const reCab = /(lan[çc]amentos|nacionais em reais|em reais|internacionais|resumo|total|vencimento|fechamento|limite|cart[aã]o|fatura|cliente|n[ou]mero)/i;
-
-  function isMasked(s) { return /\*{2,}/.test(s) && /\d/.test(s); }
-  function isResumoTotal(s) {
-    const n = normalizeDesc(s);
-    return /(total a pagar|valor total|total da fatura|saldo|resumo|pagamento minimo|minimo|encargos|juros|anuidade)/.test(n);
-  }
-  function parseValor(str) {
-    const raw = String(str);
-    const s = raw.replace(/[^0-9.,()\-]/g,'');
-    const neg = /-\s*$/.test(raw) || /-/.test(s) || (s.startsWith('(') && s.endsWith(')'));
-    let core = s.replace(/[()\-]/g,'');
-    const lastComma = core.lastIndexOf(',');
-    const lastDot = core.lastIndexOf('.');
-    let dec = null;
-    if (lastComma !== -1 || lastDot !== -1) dec = (lastComma > lastDot) ? ',' : (lastDot > lastComma ? '.' : null);
-    if (dec) {
-      const thou = dec === ',' ? /\./g : /,/g;
-      core = core.replace(thou,'').replace(dec,'.');
-    }
-    const num = parseFloat(core) || 0;
-    return neg ? -num : num;
-  }
-
-  function extract(line) {
-    if (isMasked(line)) return null;
-    if (reCab.test(line)) return null;
-    if (isResumoTotal(line)) return null;
-
-    let m = reDMY.exec(line) || reDM.exec(line) || reDMon.exec(line);
-    if (!m) return null;
-    const dateStr = m[0];
-    const data = parseDate(dateStr);
-    // valor no final
-  const valM = line.match(reVALtrail);
-    if (!valM) return null;
-  const rawValStr = valM[0];
-  const valor = parseValor(rawValStr);
-    // descricao: entre fim da data e inicio do valor
-    const start = line.indexOf(dateStr) + dateStr.length;
-    const end = line.lastIndexOf(valM[0]);
-    let desc = line.slice(start, end).replace(/\s{2,}/g,' ').trim();
-    desc = cleanDescricao(desc, banco);
-    if (!desc) return null;
-    let categoriaTipo = inferCategoria(desc);
-    let observacoes = '';
-    const trailingMinus = /-\s*$/.test(rawValStr);
-    const isNegative = valor < 0;
-    if (categoriaTipo === 'Pagamento/Crédito' || trailingMinus || isNegative) {
-      categoriaTipo = 'Pagamento/Crédito';
-      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
-      else if (/estorno|chargeback/i.test(desc) || trailingMinus || isNegative) observacoes = 'Estorno';
-    }
-    const abs = Math.abs(valor);
-    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
-    // USD/cotação/parcelas na linha
-    const reUSD = /(US\$|USD)\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
-    const reParc= /(\b\d{1,2})\s*\/\s*(\d{1,2}\b)/;
-    const reCot = /(cot[aã]o|c[aâ]mbio)\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
-    const usdM = line.match(reUSD);
-    const valorUSD = usdM ? parseValor(usdM[2]) : '';
-    const cotM = line.match(reCot);
-    const cotacao = cotM ? cotM[2] : '';
-    const parcM = line.match(reParc);
-    const parcelamento = parcM ? `${parcM[1]}/${parcM[2]}` : '';
-
-    return {
-      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
-      banco,
-      data: fmtDate(data),
-      descricao: desc,
-  local: '',
-      descricaoNormalizada: normalizeDesc(desc),
-      categoriaTipo,
-      divisao: inferDivisaoSugerida(desc),
-      valorBRL: valorAdj,
-      valorUSD: valorUSD || '',
-      cotacao: cotacao || '',
-      taxas: '',
-      parcelamento,
-      observacoes
-    };
-  }
-
-  for (const l of lines) {
-    const t = extract(l);
-    if (t) out.push(t);
-  }
-  return out;
-}
-
-// Parser específico para Itaú - evita concatenação de múltiplas transações
-function parseItauPDF(lines, banco) {
-  const out = [];
-  const reCab = /(^|\b)(lan[çc]amentos(?::\s*compras e saques)?|compras e saques|nacionais em reais|internacionais(?:\s*em\s*reais)?|total dos lan[çc]amentos|subtotal|total\b|total da fatura|pagamentos efetuados|saldo (?:anterior|financiado)|vencimento|fechamento|limite|cart[aã]o|fatura|cliente|resumo)\b/i;
-  const reDateStart = /^(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez))\b/i;
-  const reVALany = /R?\$?\s*\(?-?\s*\d+(?:[\.,]\d{3})*[\.,]\d{2}\)?\s*-?/g;
-  const reUSD = /(US\$|USD)\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i;
-  const reCot = /(cot[aã]o|c[aâ]mbio)\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2,4})/i; // aceita 2-4 decimais
-  const reParc = /(\b\d{1,2})\s*\/\s*(\d{1,2}\b)/;
-  const reIOF = /iof[^\d]*(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})/i;
-
-  function isResumoTotal(s) {
-    const n = normalizeDesc(s);
-    if (!n) return true;
-    // Começam com rótulos de somatórios/seções
-    if (/^(total|subtotal|total dos lancamentos|resumo|nacionais em reais|internacionais|compras e saques)\b/i.test(n)) return true;
-    // Indicadores globais da fatura
-    if (/(valor total|total da fatura|total a pagar|saldo (anterior|financiado)|pagamentos efetuados|pagamento minimo|minimo|encargos|juros|anuidade)/i.test(n)) return true;
-    // Linhas curtas com "total ..." geralmente são somatórios
-    if (/\btotal\b/.test(n) && n.split(' ').length <= 5) return true;
-    return false;
-  }
-
-  function parseValor(str) {
-    const raw = String(str);
-    const s = raw.replace(/[^0-9.,()\-]/g, '');
-    const trimmed = s.trim();
-    const neg = trimmed.includes('-') || (trimmed.startsWith('(') && trimmed.endsWith(')')) || /-\s*$/.test(raw);
-    let core = trimmed.replace(/[()\-]/g, '');
-    const lastComma = core.lastIndexOf(',');
-    const lastDot = core.lastIndexOf('.');
-    let dec = null;
-    if (lastComma !== -1 || lastDot !== -1) {
-      dec = (lastComma > lastDot) ? ',' : (lastDot > lastComma ? '.' : null);
-    }
-    if (dec) {
-      const thou = dec === ',' ? /\./g : /,/g;
-      core = core.replace(thou, '').replace(dec, '.');
-    }
-    const num = parseFloat(core) || 0;
-    return neg ? -num : num;
-  }
-
-  // Se ainda restou linha com mais de uma data, quebre novamente
-  function splitByDates(line) {
-    const parts = [];
-    const s = String(line || '').trim();
-    if (!s) return parts;
-    // colete inícios de datas
-    const idxs = [];
-  const reAllDates = new RegExp(reDateStart.source, 'ig');
-    let m;
-    while ((m = reAllDates.exec(s)) !== null) {
-      idxs.push(m.index);
-      if (reAllDates.lastIndex <= m.index) reAllDates.lastIndex = m.index + 1;
-    }
-    if (idxs.length <= 1) return [s];
-    for (let i = 0; i < idxs.length; i++) {
-      const start = idxs[i];
-      const end = idxs[i + 1] ?? s.length;
-      const seg = s.slice(start, end).replace(/\s{2,}/g, ' ').trim();
-      if (seg) parts.push(seg);
-    }
-    return parts;
-  }
-
-  function processSegment(seg) {
-    let line = String(seg || '').trim();
-    if (!line) return null;
-    if (reCab.test(line) || isResumoTotal(line)) return null;
-
-    // Data
-  const dm = line.match(reDateStart);
-    if (!dm) return null;
-    const dateStr = dm[0];
-    const data = parseDate(dateStr);
-    if (!data) return null;
-
-    // USD, Cotação, IOF, Parcelas
-    const usdM = line.match(reUSD);
-    const cotM = line.match(reCot);
-    const iofM = line.match(reIOF);
-    const parcM = line.match(reParc);
-    const valorUSD = usdM ? parseValor(usdM[2]) : '';
-    const cotacao = cotM ? cotM[2] : '';
-    const taxas = iofM ? `IOF ${iofM[1]}` : '';
-    const parcelamento = parcM ? `${parcM[1]}/${parcM[2]}` : '';
-
-    // Valor BRL: pegue o último número monetário que NÃO pertença ao token USD
-    const allVals = [...line.matchAll(reVALany)];
-    let valorBRL = null;
-    if (allVals.length) {
-      for (let i = allVals.length - 1; i >= 0; i--) {
-        const m = allVals[i];
-        const start = m.index ?? 0;
-        const end = start + m[0].length;
-        const around = line.slice(Math.max(0, start - 6), Math.min(line.length, end + 6));
-        if (/US\$|USD/.test(around)) continue; // provavelmente USD
-        valorBRL = parseValor(m[0]);
-        break;
-      }
-    }
-    if (valorBRL == null) return null;
-
-    // Descrição: remova data, tokens de valor e palavras-chave técnicas
-    let desc = line
-      .replace(reDateStart, '')
-      .replace(reUSD, '')
-      .replace(reCot, '')
-      .replace(reIOF, '')
-      .replace(reParc, '')
-      .replace(reVALany, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-  desc = cleanDescricao(desc, banco);
-  if (!desc) return null;
-  // Rótulos e somatórios não são lançamentos
-  const reLabelOnly = /^(total|subtotal|total dos lancamentos|resumo|nacionais em reais|internacionais|compras e saques|valor total|total da fatura|total a pagar|saldo (?:anterior|financiado)|pagamentos efetuados|pagamento minimo|minimo|encargos|juros|anuidade)\b/i;
-  if (reLabelOnly.test(desc)) return null;
-  if (isResumoTotal(desc)) return null;
-
-    // Categoria/ajustes de sinal (pagamento/estorno)
-    let categoriaTipo = inferCategoria(desc);
-    let observacoes = '';
-    const isNegative = Number(valorBRL) < 0;
-    if (categoriaTipo === 'Pagamento/Crédito' || isNegative) {
-      categoriaTipo = 'Pagamento/Crédito';
-      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
-      else if (/estorno|chargeback/i.test(desc) || isNegative) observacoes = 'Estorno';
-    }
-    const abs = Math.abs(Number(valorBRL));
-    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
-
-    return {
-      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
-      banco,
-      data: fmtDate(data),
-      descricao: desc,
-      descricaoNormalizada: normalizeDesc(desc),
-      categoriaTipo,
-      divisao: inferDivisaoSugerida(desc),
-      valorBRL: valorAdj,
-      valorUSD: valorUSD || '',
-      cotacao: cotacao || '',
-      taxas: taxas || '',
-      parcelamento: parcelamento || '',
-      observacoes
-    };
-  }
-
-  for (const raw of lines) {
-    const parts = splitByDates(raw);
-    for (const seg of parts) {
-      const t = processSegment(seg);
-      if (t) out.push(t);
+      });
     }
   }
   return out;
 }
 
-// Parser Itaú por texto integral: casa transações nacionais (2 linhas) e internacionais (3 linhas)
-// com proteção contra mistura de colunas usando lookahead
-function parseItauFromText(result, banco) {
-  const out = [];
-  const full = String(result?.text || '');
-  if (!full.trim()) return out;
-
-  // Normalizar quebras de linha: remover espaços à direita para ancoragens corretas
-  const text = full.replace(/[ \t]+$/gm, '');
-
-  // Regex unificado para capturar transações nacionais (2 linhas) e internacionais (3 linhas)
-  // com proteção contra mistura de colunas usando lookahead negativo.
-  // A flag 'm' (multiline) permite que ^ ancore no início de cada linha.
-  // A flag 'i' (case-insensitive) ajuda com variações como "Dólar" vs "dólar".
-  // A flag 'u' (unicode) garante o tratamento correto de caracteres especiais.
-  const reItauTransactions = new RegExp(
-    // Transações nacionais (2 linhas)
-    `^(?<data>\\d{2}\\/\\d{2})\\s+` +
-    `(?<estabelecimento_nacional>.+?)\\s+` +
-    `(?<valor_reais_nacional>\\d{1,3}(?:\\.\\d{3})*,\\d{2})\\r?\\n` +
-    `(?<categoria_nacional>[A-ZÇÃÉÊÓÚ\\s\\.]+)\\.(?<cidade_nacional>[A-Z\\s]+)` +
-    `(?=(?:\\r?\\n(?!\\d{2}\\/\\d{2})))` + // Lookahead: evita quebra por nova data prematura
-    `|` + // OU
-    // Transações internacionais (3 linhas)
-    `^(?<data_int>\\d{2}\\/\\d{2})\\s+` +
-    `(?<estabelecimento_int>.+?)\\s+` +
-    `(?<valor_reais_int>\\d{1,3}(?:\\.\\d{3})*,\\d{2})\\r?\\n` +
-    `(?<local_int>.+?)\\s+` +
-    `(?<valor_usd>\\d+,\\d{2})\\s+USD\\r?\\n` +
-    `Dólar\\s+de\\s+Conversão\\s+R\\$\\s*(?<cotacao_dolar>\\d+,\\d{2})` +
-    `(?=(?:\\r?\\n(?!\\d{2}\\/\\d{2})))`, // Lookahead: evita quebra por nova data prematura
-    'gmiu'
-  );
-
-  function parseValorBR(str) {
-    const s = String(str || '').replace(/\./g, '').replace(',', '.');
-    const n = parseFloat(s);
-    return isNaN(n) ? null : n;
-  }
-
-  function isValidTransaction(desc, categoria, cidade) {
-    // Filtrar cabeçalhos e ruídos comuns
-    const descLower = (desc || '').toLowerCase();
-    const catLower = (categoria || '').toLowerCase();
-    
-    // Pular cabeçalhos conhecidos
-    if (/^(lançamentos|compras e saques|nacionais em reais|internacionais|resumo|total|subtotal)/i.test(descLower)) {
-      return false;
-    }
-    
-    // Pular linhas com informações de cartão mascarado
-    if (/\*{2,}/.test(desc) && /\d{4}/.test(desc)) {
-      return false;
-    }
-    
-    // Pular totais e somatórios
-    if (/^(total|subtotal|valor total|saldo)/i.test(descLower)) {
-      return false;
-    }
-    
-    return true;
-  }
-
-  function pushTransaction(dataStr, estabelecimento, valorBRL, extras = {}) {
-    const data = parseDate(dataStr);
-    if (!data) return;
-    
-    let desc = cleanDescricao(estabelecimento, banco);
-    if (!desc) return;
-    
-    // Validar se é uma transação válida (não é cabeçalho ou ruído)
-    if (!isValidTransaction(desc, extras.categoria, extras.local)) return;
-    
-    const place = (extras.local || '').toString().trim();
-    
-    // Classificação
-    let categoriaTipo = inferCategoria(desc);
-    const isNegative = Number(valorBRL) < 0;
-    let observacoes = '';
-    
-    if (categoriaTipo === 'Pagamento/Crédito' || isNegative) {
-      categoriaTipo = 'Pagamento/Crédito';
-      if (/pagamento|pagamentos|pagto|obrigado/i.test(desc)) observacoes = 'Pagamento Fatura';
-      else if (/estorno|chargeback/i.test(desc) || isNegative) observacoes = 'Estorno';
-    }
-    
-    const abs = Math.abs(Number(valorBRL));
-    const valorAdj = (categoriaTipo === 'Pagamento/Crédito') ? -abs : abs;
-    
-    out.push({
-      id: `${banco}|${fmtDate(data)}|${desc}|${valorAdj}`,
-      banco,
-      data: fmtDate(data),
-      descricao: desc,
-      local: place,
-      descricaoNormalizada: normalizeDesc(desc),
-      categoriaTipo,
-      divisao: inferDivisaoSugerida(desc),
-      valorBRL: valorAdj,
-      valorUSD: extras.valorUSD ?? '',
-      cotacao: extras.cotacao ?? '',
-      taxas: extras.taxas ?? '',
-      parcelamento: extras.parcelamento ?? '',
-      observacoes
-    });
-  }
-
-  // Processar matches com o regex unificado
-  let match;
-  while ((match = reItauTransactions.exec(text)) !== null) {
-    const groups = match.groups;
-    
-    if (groups.data && groups.estabelecimento_nacional && groups.valor_reais_nacional) {
-      // Transação nacional (2 linhas)
-      const dataStr = groups.data;
-      const estabelecimento = groups.estabelecimento_nacional;
-      const valorStr = groups.valor_reais_nacional;
-      const categoria = groups.categoria_nacional || '';
-      const cidade = groups.cidade_nacional || '';
-      
-      const valor = parseValorBR(valorStr);
-      if (valor != null) {
-        pushTransaction(dataStr, estabelecimento, valor, { 
-          categoria, 
-          local: cidade,
-          tipo: 'nacional'
-        });
-      }
-    } else if (groups.data_int && groups.estabelecimento_int && groups.valor_reais_int) {
-      // Transação internacional (3 linhas)
-      const dataStr = groups.data_int;
-      const estabelecimento = groups.estabelecimento_int;
-      const valorStr = groups.valor_reais_int;
-      const local = groups.local_int || '';
-      const valorUSDStr = groups.valor_usd || '';
-      const cotacaoStr = groups.cotacao_dolar || '';
-      
-      const valor = parseValorBR(valorStr);
-      const valorUSD = parseValorBR(valorUSDStr);
-      
-      if (valor != null) {
-        pushTransaction(dataStr, estabelecimento, valor, {
-          local,
-          valorUSD,
-          cotacao: cotacaoStr,
-          tipo: 'internacional'
-        });
-      }
-    }
-  }
-
-  return out;
-}
-
-// Função de teste para validar o parser do Itaú com casos problemáticos
-function testItauParser() {
-  // Casos de teste simulando problemas de duas colunas
-  const testCases = [
-    {
-      name: "Transação nacional simples",
-      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
-ALIMENTAÇÃO .TRES RIOS`
-    },
-    {
-      name: "Transação internacional simples", 
-      text: `15/07  GOOGLE *CHROME            29,55
-650-253-0000   5,00   USD
-Dólar de Conversão R$ 5,91`
-    },
-    {
-      name: "Problema de duas colunas - nacional + nacional",
-      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
-ALIMENTAÇÃO .TRES RIOS 20/07  SUPREME PANIFICADORA T 45,40
-ALIMENTAÇÃO .TRES RIOS`
-    },
-    {
-      name: "Problema de duas colunas - nacional + internacional", 
-      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
-ALIMENTAÇÃO .TRES RIOS 15/07  GOOGLE *CHROME            29,55
-650-253-0000   5,00   USD
-Dólar de Conversão R$ 5,91`
-    },
-    {
-      name: "Múltiplas transações válidas",
-      text: `11/07  IFD*AMS TR DELIVERY LT    73,00
-ALIMENTAÇÃO .TRES RIOS
-
-20/07  SUPREME PANIFICADORA T    45,40  
-ALIMENTAÇÃO .TRES RIOS
-
-15/07  GOOGLE *CHROME            29,55
-650-253-0000   5,00   USD
-Dólar de Conversão R$ 5,91`
-    }
-  ];
-
-  console.log('🔍 Testando parser Itaú melhorado...');
-  
-  for (const testCase of testCases) {
-    console.log(`\n📝 Teste: ${testCase.name}`);
-    console.log('Entrada:', testCase.text.replace(/\n/g, '\\n'));
-    
-    const result = parseItauFromText({ text: testCase.text }, 'Itaú');
-    console.log(`Transações encontradas: ${result.length}`);
-    
-    for (const trans of result) {
-      console.log(`  - ${trans.data} | ${trans.descricao} | R$ ${trans.valorBRL}`);
-      if (trans.valorUSD) console.log(`    USD: ${trans.valorUSD} | Cotação: ${trans.cotacao}`);
-    }
-  }
-  
-  return testCases.length;
-}
-
-// Expor função de teste no console para debugging
-window.testItauParser = testItauParser;
-
-// Fallback tolerante por linhas: detecta blocos nacionais (2 linhas) e internacionais (3-4 linhas)
-// parseItauFromLines removido: voltamos ao parser único por texto com lookaheads contra mistura de colunas
-function inferCategoria(desc) {
-  const s = normalizeDesc(desc);
-  if (/\b(pagamento|pagamentos|pagto|credito|creditos|cr[eé]dito|cr[eé]ditos|estorno|estornos|chargeback)\b/.test(s)) return 'Pagamento/Crédito';
-  if (/ifood|raia|drogasil|burger|mcdonald|padaria|supermercado|mercado|pizza|lanche|restaurante/.test(s)) return 'Alimentação';
-  if (/uber|99pop|99\s*taxis|combustivel|posto|estacionamento|pedagio/.test(s)) return 'Transporte';
-  if (/farmacia|drogaria|clinica|plano de saude|wellhub|gympass|academia/.test(s)) return 'Saúde';
-  if (/netflix|spotify|prime|disney|hbo|assinatura|subscription|plan/.test(s)) return 'Assinaturas';
-  if (/amazon|mercado livre|magalu|aliexpress|shein|store|marketplace/.test(s)) return 'Compras Online';
-  if (/iof|juros|multa|anuidade|tarifa/.test(s)) return 'Serviços Financeiros';
-  if (/cinema|evento|hotel|viagem|passagem/.test(s)) return 'Lazer';
-  if (/curso|livro|escola|faculdade/.test(s)) return 'Educação';
-  if (/energia|luz|agua|internet|manutencao|condominio|aluguel|decoracao/.test(s)) return 'Casa';
-  return 'Outros';
-}
-
+// Helpers de aprendizado e divisão (mantidos)
 function inferDivisaoSugerida(desc) {
   const key = normalizeDesc(desc);
   const rule = STATE.regras[key];
   if (rule) return rule.divisao + ' (sugerido)';
-  // fallback: heurística simples, pode começar como Geral
   return 'Geral (sugerido)';
 }
 
 function aplicarAprendizado(t) {
-  // se "... (sugerido)" -> extrair base
-  if (t.divisao.endsWith('(sugerido)')) {
+  if (t.divisao && t.divisao.endsWith('(sugerido)')) {
     const key = t.descricaoNormalizada;
     const r = STATE.regras[key];
     if (r) t.divisao = r.divisao + ' (sugerido)';
@@ -1061,18 +322,15 @@ function aplicarAprendizado(t) {
 }
 
 function confirmarDivisao(transacao, escolha) {
-  // Atualiza a UI do item atual
-  transacao.divisao = escolha; // persistir escolha limpa
+  transacao.divisao = escolha;
   const key = transacao.descricaoNormalizada;
   const rule = ensureRule(key);
-  // Ajustar contadores com base na última decisão desta transação
   const decKey = transacao.id;
   const prevDecision = STATE.decisions[decKey]?.divisao;
   if (prevDecision && rule.counts[prevDecision] != null) {
     rule.counts[prevDecision] = Math.max(0, (rule.counts[prevDecision] || 0) - 1);
   }
   rule.counts[escolha] = (rule.counts[escolha] || 0) + 1;
-  // Maioria decide; empate favorece a última escolha
   const g = rule.counts.Geral || 0;
   const e = rule.counts.Exclusiva || 0;
   rule.divisao = (g === e) ? escolha : (g > e ? 'Geral' : 'Exclusiva');
@@ -1431,27 +689,24 @@ function importRegrasJSON(file) {
 function initUI() {
   const dz = document.getElementById('dropzone');
   const fileInput = document.getElementById('file-input');
+  const pasteBtn = document.getElementById('btn-paste-json');
+  const pasteDlg = document.getElementById('paste-json-dialog');
+  const pasteTxt = document.getElementById('paste-json-text');
 
   const onFiles = async (files) => {
     if (!files || files.length === 0) return;
-    setStatus('Lendo PDFs...');
+    setStatus('Processando JSON...');
     const acc = [];
-  for (const f of files) {
+    for (const f of files) {
       try {
-    const result = await extractTextFromPDF(f);
-    const { text, pages, rows } = result;
-    if (!text || !text.trim()) {
-          setStatus(`Arquivo: ${f.name} — Sem texto detectável (possível PDF escaneado). Este MVP não faz OCR.`);
-          continue;
-        }
-    const banco = detectBanco(text, f.name);
-    const trs = parseTransacoesGeneric(result, banco);
+        const json = await readJSONFile(f);
+        const trs = mapJsonToTransactions(json, f.name);
         trs.forEach(aplicarAprendizado);
         acc.push(...trs);
-        setStatus(`Arquivo: ${f.name} — Banco: ${banco} — Páginas: ${pages} — Lançamentos: ${trs.length}`);
+        setStatus(`Arquivo: ${f.name} — Lançamentos: ${trs.length}`);
       } catch (e) {
-        console.error('Erro lendo', f.name, e);
-        setStatus(`Erro ao ler ${f.name}: ${e?.message || e}. Dica: certifique-se de estar online (para carregar as bibliotecas) ou tente servir a pasta via um servidor local.`);
+        console.error('Erro lendo JSON', f.name, e);
+        setStatus(`Erro ao processar ${f.name}: ${e?.message || e}`);
       }
     }
     // merge com existentes e dedupe
@@ -1462,18 +717,73 @@ function initUI() {
     recalcSummary();
     renderTable();
     savePrefs();
-    setStatus(`Carregado${STATE.transacoes.length ? ': ' + STATE.transacoes.length + ' lançamentos' : ' (nenhum lançamento reconhecido – ajuste os PDFs ou aguarde melhorias de parser).'}`);
+    setStatus(`Carregado${STATE.transacoes.length ? ': ' + STATE.transacoes.length + ' lançamentos' : ' (nenhum lançamento encontrado no JSON).'}`);
   };
 
   dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
   dz.addEventListener('drop', (e) => {
     e.preventDefault(); dz.classList.remove('dragover');
-    const files = [...(e.dataTransfer?.files || [])].filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'));
+    const files = [...(e.dataTransfer?.files || [])].filter(f => f.type === 'application/json' || f.name.endsWith('.json'));
     onFiles(files);
   });
 
   fileInput.addEventListener('change', (e) => onFiles([...e.target.files]));
+
+  // Colar JSON: abrir diálogo
+  if (pasteBtn && pasteDlg && pasteTxt) {
+    pasteBtn.addEventListener('click', () => {
+      try {
+        pasteDlg.showModal();
+        // Seleciona e foca o textarea para colar
+        setTimeout(() => { pasteTxt.focus(); pasteTxt.select(); }, 0);
+      } catch (e) {
+        // Fallback se dialog não suportado
+        const raw = prompt('Cole o JSON padronizado aqui:');
+        if (raw != null) handlePastedJSON(raw);
+      }
+    });
+
+    // Intercepta submit do form dentro do dialog
+    pasteDlg.addEventListener('close', () => {
+      // nada; ações são tratadas no submit
+    });
+
+    pasteDlg.querySelector('form')?.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const raw = pasteTxt.value || '';
+      handlePastedJSON(raw);
+      try { pasteDlg.close(); } catch {}
+      pasteTxt.value = '';
+    });
+
+    // Botão cancelar já fecha pelo method=dialog; apenas limpa texto
+    document.getElementById('btn-paste-cancel')?.addEventListener('click', () => {
+      pasteTxt.value = '';
+    });
+  }
+
+  async function handlePastedJSON(raw) {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return;
+    setStatus('Processando JSON colado...');
+    try {
+      const json = JSON.parse(trimmed);
+      const trs = mapJsonToTransactions(json, 'pasted');
+      trs.forEach(aplicarAprendizado);
+      const map = new Map(STATE.transacoes.map(t => [t.id, t]));
+      for (const t of trs) map.set(t.id, t);
+      STATE.transacoes = [...map.values()];
+      updateBancoFiltroOptions();
+      recalcSummary();
+      renderTable();
+      savePrefs();
+      setStatus(`Carregado: ${trs.length} lançamentos (via colar JSON)`);
+    } catch (e) {
+      console.error('Erro ao processar JSON colado', e);
+      setStatus('Erro: JSON inválido. Verifique a estrutura.');
+    }
+  }
 
   document.getElementById('btn-aplicar-filtros').addEventListener('click', () => {
     STATE.filters = {

@@ -12,9 +12,10 @@
       <h1>Controle de Faturas 60/40</h1>
       <div class="actions">
         <label class="btn">
-          <input id="file-input" type="file" accept="application/pdf" multiple hidden />
-          <span>Selecionar PDFs</span>
+          <input id="file-input" type="file" accept="application/json,.json" multiple hidden />
+          <span>Selecionar JSON</span>
         </label>
+  <button id="btn-paste-json" class="btn">Colar JSON</button>
         <button id="btn-export-csv" class="btn" disabled>Exportar CSV</button>
         <button id="btn-export-xlsx" class="btn" disabled>Exportar XLSX</button>
         <button id="btn-export-regras" class="btn btn-secondary">Exportar Regras</button>
@@ -29,8 +30,8 @@
     </header>
 
     <main class="container">
-      <section id="dropzone" class="dropzone" tabindex="0" aria-label="Solte aqui seus PDFs">
-        <p>Arraste e solte suas faturas em PDF aqui ou use o botão "Selecionar PDFs"</p>
+      <section id="dropzone" class="dropzone" tabindex="0" aria-label="Solte aqui seus JSONs">
+        <p>Arraste e solte seus arquivos JSON aqui ou use o botão "Selecionar JSON"</p>
       </section>
 
       <section class="panel">
@@ -172,16 +173,25 @@
       </section>
     </main>
 
-    <!-- pdf.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-      // Configura o worker do pdf.js somente se a lib estiver disponível
-      if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      } else {
-        console.warn('pdf.js não carregado ainda; seguindo sem configurar worker.');
-      }
-    </script>
+    <!-- Dialogo para colar JSON -->
+    <dialog id="paste-json-dialog" style="max-width: 900px; width: 90%; border-radius: 8px;">
+      <form method="dialog" style="display:flex; flex-direction:column; gap:12px;">
+        <h3 style="margin:0">Importar colando JSON</h3>
+        <p style="margin:0; color: var(--muted);">Cole abaixo o conteúdo JSON no formato padronizado com a chave "faturas".</p>
+        <textarea id="paste-json-text" rows="14" style="width:100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; padding:8px; border:1px solid #ccc; border-radius:6px; resize:vertical;" placeholder='{
+  "faturas": [
+    { "identificacao": {"banco": "Bradesco", "cartao": "Visa Signature", "mesReferencia": "05/2024"},
+      "transacoes": [ { "data": "2024-05-01", "descricao": "...", "categoria": "...", "valorBRL": 0 } ] }
+  ]
+}'></textarea>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button id="btn-paste-cancel" value="cancel" class="btn btn-secondary" type="reset">Cancelar</button>
+          <button id="btn-paste-import" value="default" class="btn" type="submit">Importar</button>
+        </div>
+      </form>
+    </dialog>
+
+  <!-- pdf.js removido: a importação agora é via JSON estruturado -->
 
     <!-- SheetJS para exportar XLSX -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>

@@ -10,7 +10,8 @@ const LS_KEYS = {
   split: 'cg_split_v1',
   insightsCollapsed: 'cg_insights_collapsed_v1',
   theme: 'cg_theme_v1',
-  lancFuzzy: 'cg_lanc_fuzzy_v1'
+  lancFuzzy: 'cg_lanc_fuzzy_v1',
+  exportScope: 'cg_export_scope_v1'
 };
 
 const STATE = {
@@ -27,7 +28,11 @@ const STATE = {
     if (saved === 'light' || saved === 'dark') return saved;
     try { return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; } catch { return 'dark'; }
   })(),
-  lancFuzzy: JSON.parse(localStorage.getItem(LS_KEYS.lancFuzzy) || 'null') || ''
+  lancFuzzy: JSON.parse(localStorage.getItem(LS_KEYS.lancFuzzy) || 'null') || '',
+  exportScope: (function(){
+    const v = JSON.parse(localStorage.getItem(LS_KEYS.exportScope) || 'null');
+    return ['todos','geral','exclusiva'].includes(v) ? v : 'todos';
+  })()
 };
 
 // Reclassificação: mapa de overrides de categoria para itens originalmente marcados como Pagamento/Crédito
@@ -146,6 +151,7 @@ function savePrefs() {
   localStorage.setItem(LS_KEYS.insightsCollapsed, JSON.stringify(STATE.insightsCollapsed));
   localStorage.setItem(LS_KEYS.theme, JSON.stringify(STATE.theme));
   localStorage.setItem(LS_KEYS.lancFuzzy, JSON.stringify(STATE.lancFuzzy));
+  localStorage.setItem(LS_KEYS.exportScope, JSON.stringify(STATE.exportScope));
 }
 
 function applyTheme() {
@@ -993,9 +999,14 @@ function renderTable() {
   }
 
   // habilita export se há dados
-  const has = STATE.transacoes.length > 0;
-  document.getElementById('btn-export-csv').disabled = !has;
-  document.getElementById('btn-export-xlsx').disabled = !has;
+  const exportData = getExportLancamentos();
+  const has = exportData.length > 0;
+  const btnCsv = document.getElementById('btn-export-csv');
+  const btnXlsx = document.getElementById('btn-export-xlsx');
+  const btnPdf = document.getElementById('btn-export-pdf');
+  if (btnCsv) btnCsv.disabled = !has;
+  if (btnXlsx) btnXlsx.disabled = !has;
+  if (btnPdf) btnPdf.disabled = !has;
 
   renderInsights(despesas);
 }
@@ -1007,13 +1018,30 @@ function updateBancoFiltroOptions() {
   if (STATE.filters.banco) sel.value = STATE.filters.banco;
 }
 
-// CSV/XLSX export
-function exportCSV() {
+// Retorna lançamentos (não pagamentos) já com filtros e escopo de exportação aplicados
+function getExportLancamentos() {
   const rows = [['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','IOF','Taxas','Parcelamento','Observações']];
   const all = applyFiltersSort();
-  const despesas = all.filter(t => !isPagamento(t));
-  const pagamentos = all.filter(t => isPagamento(t));
-  for (const t of despesas.concat(pagamentos)) {
+  // Apenas lançamentos (despesas), nunca pagamentos no arquivo
+  let despesas = all.filter(t => !isPagamento(t));
+  // Aplicar fuzzy de lançamentos, para manter consistência com a tabela
+  const q = (STATE.lancFuzzy || '').trim();
+  if (q) despesas = despesas.filter(t => lancamentoMatchesQuery(t, q));
+  // Escopo: todos (geral+exclusiva), apenas geral, apenas exclusiva
+  const scope = STATE.exportScope || 'todos';
+  if (scope === 'geral') {
+    despesas = despesas.filter(t => t.divisao.replace(' (sugerido)','') !== 'Exclusiva');
+  } else if (scope === 'exclusiva') {
+    despesas = despesas.filter(t => t.divisao.replace(' (sugerido)','') === 'Exclusiva');
+  }
+  return despesas;
+}
+
+// CSV/XLSX export
+function exportCSV() {
+  const despesas = getExportLancamentos();
+  const rows = [['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','IOF','Taxas','Parcelamento','Observações']];
+  for (const t of despesas) {
     rows.push([
       t.data,
       t.banco,
@@ -1040,15 +1068,19 @@ function exportCSV() {
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'transacoes.csv'; a.click();
+  const scope = STATE.exportScope || 'todos';
+  const suffix = scope === 'geral' ? 'geral' : (scope === 'exclusiva' ? 'exclusivas' : 'todas');
+  a.href = url; a.download = `transacoes_${suffix}.csv`; a.click();
   URL.revokeObjectURL(url);
 }
 
 function exportXLSX() {
-  const all = applyFiltersSort();
-  const despesas = all.filter(t => !isPagamento(t));
-  const pagamentos = all.filter(t => isPagamento(t));
-  const data = despesas.concat(pagamentos).map(t => ({
+  const despesas = getExportLancamentos();
+  const scope = STATE.exportScope || 'todos';
+  const suffix = scope === 'geral' ? 'geral' : (scope === 'exclusiva' ? 'exclusivas' : 'todas');
+
+  // 1) Planilha de dados: Transacoes (com formatos básicos)
+  const data = despesas.map(t => ({
     Data: t.data,
     'Banco/Cartão': t.banco,
     Descrição: t.descricao,
@@ -1058,15 +1090,231 @@ function exportXLSX() {
     'Valor R$': Number(t.valorBRL)||0,
     'Valor USD': t.valorUSD !== '' ? Number(t.valorUSD) : '',
     Cotação: t.cotacao ?? '',
-  IOF: t.iof !== '' ? Number(t.iof) : '',
+    IOF: t.iof !== '' ? Number(t.iof) : '',
     Taxas: t.taxas ?? '',
     Parcelamento: t.parcelamento ?? '',
     Observações: t.observacoes ?? ''
   }));
   const ws = XLSX.utils.json_to_sheet(data);
+  // Larguras de colunas (caracteres aproximadamente)
+  ws['!cols'] = [
+    { wch: 10 }, // Data
+    { wch: 26 }, // Banco/Cartão
+    { wch: 48 }, // Descrição
+    { wch: 22 }, // Local
+    { wch: 18 }, // Categoria
+    { wch: 14 }, // Divisão
+    { wch: 14 }, // Valor R$
+    { wch: 12 }, // Valor USD
+    { wch: 10 }, // Cotação
+    { wch: 10 }, // IOF
+    { wch: 14 }, // Taxas
+    { wch: 16 }, // Parcelamento
+    { wch: 40 }  // Observações
+  ];
+  // AutoFilter no cabeçalho
+  if (ws['!ref']) ws['!autofilter'] = { ref: ws['!ref'] };
+  // Formatação numérica básica
+  try {
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    // Identificar índices de colunas pelos cabeçalhos gerados
+    const headers = ['Data','Banco/Cartão','Descrição','Local','Categoria','Divisão','Valor R$','Valor USD','Cotação','IOF','Taxas','Parcelamento','Observações'];
+    const colIdx = (name) => headers.indexOf(name);
+    const colValor = colIdx('Valor R$');
+    const colUSD = colIdx('Valor USD');
+    const colIOF = colIdx('IOF');
+    for (let R = range.s.r + 1; R <= range.e.r; ++R) { // pular cabeçalho
+      const addrValor = XLSX.utils.encode_cell({ r: R, c: colValor });
+      const addrUSD = XLSX.utils.encode_cell({ r: R, c: colUSD });
+      const addrIOF = XLSX.utils.encode_cell({ r: R, c: colIOF });
+      if (ws[addrValor] && typeof ws[addrValor].v === 'number') ws[addrValor].z = 'R$ #,##0.00';
+      if (ws[addrUSD] && typeof ws[addrUSD].v === 'number') ws[addrUSD].z = '$ #,##0.00';
+      if (ws[addrIOF] && typeof ws[addrIOF].v === 'number') ws[addrIOF].z = '#,##0.00';
+    }
+  } catch {}
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Transacoes');
-  XLSX.writeFile(wb, 'transacoes.xlsx');
+
+  // 2) Sheet de Resumo com totais e quebra por categoria
+  const totalDespesas = despesas.reduce((acc, t) => acc + (Number(t.valorBRL) || 0), 0);
+  const userPerc = Math.max(0, Math.min(100, Number(STATE.split?.usuario) || 0));
+  const spousePerc = 100 - userPerc;
+  const divLimpa = (t) => (t.divisao || '').replace(' (sugerido)','') || 'Geral';
+  const totalGeral = despesas.filter(t => divLimpa(t) !== 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  const totalExclusivas = despesas.filter(t => divLimpa(t) === 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  const userShareGeral = totalGeral * (userPerc/100);
+  const spouseShareGeral = totalGeral * (spousePerc/100);
+  const userTotalAll = totalExclusivas + userShareGeral;
+
+  // Quebra por categoria
+  const catMap = new Map();
+  for (const t of despesas) {
+    const k = t.categoriaTipo || '—';
+    catMap.set(k, (catMap.get(k)||0) + (Number(t.valorBRL)||0));
+  }
+  const catRows = [...catMap.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k, v]);
+
+  const resumoAOA = [];
+  resumoAOA.push([`Escopo da exportação: ${scope === 'geral' ? 'Compartilhadas (Geral)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas as despesas (Geral + Exclusivas)'}`]);
+  resumoAOA.push([`Total de despesas no escopo:`, totalDespesas]);
+  if (scope === 'geral') {
+    resumoAOA.push([]);
+    resumoAOA.push(['Proporção de divisão (Geral)']);
+    resumoAOA.push(['Usuário (%)', userPerc]);
+    resumoAOA.push(['Esposa (%)', spousePerc]);
+    resumoAOA.push(['Usuário (R$)', userShareGeral]);
+    resumoAOA.push(['Esposa (R$)', spouseShareGeral]);
+  } else if (scope === 'todos') {
+    resumoAOA.push([]);
+    resumoAOA.push(['Totais por divisão']);
+    resumoAOA.push(['Geral (a dividir)', totalGeral]);
+    resumoAOA.push(['Exclusivas (Usuário)', totalExclusivas]);
+    resumoAOA.push(['Usuário (%) sobre Geral', userPerc]);
+    resumoAOA.push(['Usuário total (Exclusivas + % Geral)', userTotalAll]);
+    resumoAOA.push(['Esposa total (% Geral)', spouseShareGeral]);
+  } else if (scope === 'exclusiva') {
+    resumoAOA.push([]);
+    resumoAOA.push(['Observação', 'Somente despesas exclusivas do usuário neste arquivo.']);
+  }
+  resumoAOA.push([]);
+  resumoAOA.push(['Categorias', 'Total (R$)']);
+  resumoAOA.push(...catRows);
+  resumoAOA.push([]);
+  resumoAOA.push(['Dica: para criar um gráfico no Excel, selecione a tabela de Categorias acima e use Inserir > Gráfico de Barras/Colunas.']);
+
+  const wsResumo = XLSX.utils.aoa_to_sheet(resumoAOA);
+  // Ajustes simples: números como moeda nas colunas de totais
+  try {
+    const r = XLSX.utils.decode_range(wsResumo['!ref']);
+    for (let R = r.s.r; R <= r.e.r; ++R) {
+      const c1 = XLSX.utils.encode_cell({ r: R, c: 1 }); // segunda coluna
+      if (wsResumo[c1] && typeof wsResumo[c1].v === 'number') {
+        wsResumo[c1].z = 'R$ #,##0.00';
+      }
+    }
+  } catch {}
+  wsResumo['!cols'] = [{ wch: 36 }, { wch: 18 }];
+  XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
+
+  XLSX.writeFile(wb, `transacoes_${suffix}.xlsx`);
+}
+
+// Exporta um PDF com o resumo (cores e negritos) e tabela por categorias
+async function exportResumoPDF() {
+  try {
+    const despesas = getExportLancamentos();
+    if (!despesas.length) { setStatus('Sem dados para exportar PDF.'); return; }
+    const scope = STATE.exportScope || 'todos';
+    const jspdfNS = window.jspdf || window.jsPDF || {};
+    const PDFDoc = jspdfNS.jsPDF || window.jsPDF;
+    if (!PDFDoc) { setStatus('Biblioteca jsPDF não carregada.'); return; }
+
+    const fmtBRL = (n) => (Number(n)||0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    const now = new Date();
+    const dateStr = now.toLocaleString('pt-BR');
+    const margin = 40; // pt
+    const doc = new PDFDoc({ unit: 'pt', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const contentWidth = pageWidth - margin * 2;
+
+    // Cálculos do resumo (compatível com exportXLSX)
+    const divLimpa = (t) => (t.divisao || '').replace(' (sugerido)','') || 'Geral';
+    const total = despesas.reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+    const totalGeral = despesas.filter(t => divLimpa(t) !== 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+    const totalExclusivas = despesas.filter(t => divLimpa(t) === 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+    const uPerc = Math.max(0, Math.min(100, Number(STATE.split?.usuario) || 0));
+    const ePerc = 100 - uPerc;
+    const userShareGeral = totalGeral * (uPerc/100);
+    const spouseShareGeral = totalGeral * (ePerc/100);
+    const userTotalAll = totalExclusivas + userShareGeral;
+
+    // Cabeçalho
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.text('Resumo de Despesas', margin, margin);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    const scopeLabel = scope === 'geral' ? 'Compartilhadas (Geral)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas (Geral + Exclusivas)';
+    doc.text(`Escopo: ${scopeLabel} • Exportado em: ${dateStr}`, margin, margin + 18);
+
+    // Tabela de resumo (duas colunas)
+    const summaryRows = [];
+    summaryRows.push(['Total no escopo', fmtBRL(total)]);
+    if (scope === 'geral') {
+      summaryRows.push(['Usuário (%)', `${uPerc}%`]);
+      summaryRows.push(['Esposa (%)', `${ePerc}%`]);
+      summaryRows.push(['Usuário (R$)', fmtBRL(userShareGeral)]);
+      summaryRows.push(['Esposa (R$)', fmtBRL(spouseShareGeral)]);
+    } else if (scope === 'todos') {
+      summaryRows.push(['Geral (a dividir)', fmtBRL(totalGeral)]);
+      summaryRows.push(['Exclusivas (Usuário)', fmtBRL(totalExclusivas)]);
+      summaryRows.push(['Usuário (%) sobre Geral', `${uPerc}%`]);
+      summaryRows.push(['Usuário total (Exclusivas + % Geral)', fmtBRL(userTotalAll)]);
+      summaryRows.push(['Esposa total (% Geral)', fmtBRL(spouseShareGeral)]);
+    } else if (scope === 'exclusiva') {
+      summaryRows.push(['Observação', 'Somente despesas exclusivas do usuário.']);
+    }
+
+    doc.autoTable({
+      startY: margin + 30,
+      theme: 'grid',
+      head: [['Resumo', 'Valor']],
+      body: summaryRows,
+      styles: { font: 'helvetica', fontStyle: 'normal', fillColor: [255,255,255] },
+      headStyles: { fillColor: [56,189,248], textColor: [0,16,24], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [245, 248, 255] },
+      columnStyles: { 0: { cellWidth: contentWidth*0.55 }, 1: { halign: 'right' } },
+      margin: { left: margin, right: margin }
+    });
+
+    let y = doc.lastAutoTable.finalY + 20;
+
+    // Tentativa de inserir imagem do gráfico de categorias (se disponível)
+    try {
+      if (window.echarts && ECHARTS && ECHARTS.topcat) {
+        const imgData = ECHARTS.topcat.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' });
+        const imgW = contentWidth;
+        const imgH = imgW * 0.45; // proporção aproximada
+        doc.text('Gráfico: Top Categorias', margin, y);
+        y += 6;
+        doc.addImage(imgData, 'PNG', margin, y + 6, imgW, imgH, undefined, 'FAST');
+        y += imgH + 20;
+      }
+    } catch {}
+
+    // Tabela por categoria
+    const catMap = new Map();
+    for (const t of despesas) {
+      const k = t.categoriaTipo || '—';
+      catMap.set(k, (catMap.get(k) || 0) + (Number(t.valorBRL) || 0));
+    }
+    const cats = [...catMap.entries()].sort((a,b)=>b[1]-a[1]);
+    const catBody = cats.map(([k,v]) => [k, fmtBRL(v)]);
+
+    doc.autoTable({
+      startY: y,
+      theme: 'grid',
+      head: [['Categoria', 'Total (R$)']],
+      body: catBody,
+      styles: { font: 'helvetica', fillColor: [255,255,255] },
+      headStyles: { fillColor: [34,197,94], textColor: [6,42,21], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [240, 253, 244] },
+      columnStyles: { 0: { cellWidth: contentWidth*0.65 }, 1: { halign: 'right' } },
+      margin: { left: margin, right: margin }
+    });
+
+    // Rodapé com nota
+    doc.setFontSize(9);
+    doc.setTextColor(120);
+    doc.text('Dica: você pode gerar gráficos no Excel usando a aba Resumo da planilha XLSX exportada.', margin, doc.internal.pageSize.getHeight() - 30);
+
+    const fileSuffix = scope === 'geral' ? 'geral' : (scope === 'exclusiva' ? 'exclusivas' : 'todas');
+    doc.save(`resumo_${fileSuffix}.pdf`);
+  } catch (e) {
+    console.warn('Falha ao exportar PDF', e);
+    setStatus('Falha ao exportar PDF.');
+  }
 }
 
 // Import/Export de regras (aprendizado) em JSON portátil
@@ -1378,6 +1626,21 @@ function initUI() {
 
   document.getElementById('btn-export-csv').addEventListener('click', exportCSV);
   document.getElementById('btn-export-xlsx').addEventListener('click', exportXLSX);
+  const exportScopeSel = document.getElementById('export-scope');
+  if (exportScopeSel) {
+    // inicializa
+    exportScopeSel.value = STATE.exportScope || 'todos';
+    exportScopeSel.addEventListener('change', () => {
+      const val = exportScopeSel.value;
+      STATE.exportScope = ['todos','geral','exclusiva'].includes(val) ? val : 'todos';
+      savePrefs();
+      // reavaliar botões de export e insights
+      renderTable();
+    });
+  }
+  // PDF export
+  const btnPdf = document.getElementById('btn-export-pdf');
+  if (btnPdf) btnPdf.addEventListener('click', exportResumoPDF);
   const btnExpReg = document.getElementById('btn-export-regras');
   if (btnExpReg) btnExpReg.addEventListener('click', exportRegrasJSON);
   const inpImpReg = document.getElementById('input-import-regras');

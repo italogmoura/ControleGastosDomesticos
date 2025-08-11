@@ -18,8 +18,14 @@
   <button id="btn-paste-json" class="btn">Colar JSON</button>
   <button id="btn-theme" class="btn btn-secondary" aria-label="Alternar tema">Tema</button>
   <button id="btn-review-mode" class="btn">Modo Classificação</button>
+        <select id="export-scope" title="Escopo da exportação" style="background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;">
+          <option value="todos">Exportar: todos os lançamentos</option>
+          <option value="geral">Exportar: apenas compartilhados (Geral)</option>
+          <option value="exclusiva">Exportar: apenas exclusivos do usuário</option>
+        </select>
         <button id="btn-export-csv" class="btn" disabled>Exportar CSV</button>
         <button id="btn-export-xlsx" class="btn" disabled>Exportar XLSX</button>
+  <button id="btn-export-pdf" class="btn" disabled>Exportar PDF (Resumo)</button>
         <button id="btn-export-regras" class="btn btn-secondary">Exportar Regras</button>
         <label class="btn btn-secondary">
           <input id="input-import-regras" type="file" accept="application/json" hidden />
@@ -339,6 +345,9 @@
 
   <!-- SheetJS para exportar XLSX -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- jsPDF + AutoTable para exportar PDF com tabelas formatadas -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha512-YkD0qk1OZQXy3fsn3oMb7v3dRkJYg0+1sV+1kY2S5c9k5U8oHn3zC5qvWQ3dhb4Wm2r2z8Ws9D2wWhLqQduF0A==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js" integrity="sha512-vP6qg6q7y8yR0g6TqI3d2bB4OMY1qL9kM1y9sI6jK0e8Z2mG4f+T+7W2vXQ+5dks0tM6vZf3bA7oUp8sY6lqXQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <!-- Apache ECharts para gráficos de insights -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 

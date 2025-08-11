@@ -113,6 +113,26 @@ function cleanDescricao(desc = '', banco = '') {
   return s.trim().replace(/\s{2,}/g,' ');
 }
 
+// Inferência simples de categoria a partir da descrição (fallback)
+function inferCategoria(desc = '') {
+  const s = stripDiacritics(String(desc || '').toLowerCase());
+  // Transporte
+  if (/(uber|\b99\b|estaciona|posto|shellbox|combust|gasolina|ec \*shellbox)/.test(s)) return 'Transporte';
+  // Saúde
+  if (/(drog|farm|saude|odont|odonto|medic|perfill? odonto|raia)/.test(s)) return 'Saúde';
+  // Alimentação
+  if (/(rest|burger|ifood|padaria|sushi|lanche|hortifruti|mercad|prezunic|bar|caf[eé]|japa|grill|steak|chocolateria|panificadora|lanc|fruti)/.test(s)) return 'Alimentação';
+  // Assinaturas
+  if (/(spotify|netflix|prime|subscription|assin|gympass|bubble|claude\.ai|openai|google chrome)/.test(s)) return 'Assinaturas';
+  // Compras Online
+  if (/(amazon|mercado ?livre|magalu|aliexpress|shein|mercadolivre)/.test(s)) return 'Compras Online';
+  // Lazer
+  if (/(cinema|show|teatro|parque|hotel|booking|lazer)/.test(s)) return 'Lazer';
+  // Serviços Financeiros
+  if (/(retirada de fundos|pagamentos validos normais|servi[cç]os financeiros)/.test(s)) return 'Serviços Financeiros';
+  return 'Outros';
+}
+
 const setStatus = (msg) => {
   document.getElementById('status').textContent = msg || '';
 };
@@ -353,7 +373,80 @@ function mapJsonToTransactions(json, filename = '') {
     const dataFechamento = idfF.dataFechamento || '';
     const periodoReferencia = idfF.periodoReferencia || '';
 
-    // Se existir array de cartoes no novo esquema
+    // 1) Formato vetorizado (transacoes em colunas com índices cartaoIdx/categoriaIdx) no nível da fatura
+    const tx = f && f.transacoes;
+    const isVectorized = tx && !Array.isArray(tx) && typeof tx === 'object' && Array.isArray(tx.data) && Array.isArray(f.cartoes);
+    if (isVectorized) {
+      const cards = Array.isArray(f.cartoes) ? f.cartoes : [];
+      const categorias = Array.isArray(f.categorias) ? f.categorias : [];
+      const n = tx.data.length;
+      for (let i = 0; i < n; i++) {
+        const dataISO = tx.data?.[i] || '';
+        const d = dataISO ? new Date(dataISO) : null;
+        const data = d && !isNaN(d) ? fmtDate(d) : '';
+        const descricao = cleanDescricao(tx.descricao?.[i] || '', banco);
+        const local = tx.local?.[i] || '';
+        const valorBRLnum = Number(tx.valorBRL?.[i] ?? 0);
+        const valorUSDraw = tx.valorUSD?.[i];
+        const valorUSDnum = (valorUSDraw == null || valorUSDraw === '') ? '' : Number(valorUSDraw);
+        const cotacaoRaw = tx.cotacaoDolar?.[i];
+        const cotacao = (cotacaoRaw == null || cotacaoRaw === '') ? '' : String(cotacaoRaw);
+        const iofRaw = tx.iof?.[i];
+        const iof = (iofRaw == null || iofRaw === '') ? '' : Number(iofRaw);
+        const taxas = '';
+        const parcelamento = tx.parcelamento?.[i] || '';
+        const catIdx = tx.categoriaIdx?.[i];
+        const categoriaRaw = (catIdx != null && categorias[catIdx] != null) ? String(categorias[catIdx]) : '';
+        const cIdx = tx.cartaoIdx?.[i];
+        const c = (cIdx != null && cards[cIdx]) ? cards[cIdx] : {};
+        const titular = c.titular || '';
+        const bandeira = c.bandeira || '';
+        const tipoCartao = c.tipo || '';
+        const finalCartao = c.final || '';
+        const cartaoLabel = [bandeira || tipoCartao ? `${bandeira} ${tipoCartao}`.trim() : '', finalCartao ? `final ${finalCartao}` : ''].filter(Boolean).join(' ');
+        const cartaoRaw = cartaoLabel || finalCartao || '';
+        const tipoLancamento = tx.tipoLancamento?.[i] || '';
+        const categoriaTipoGuess = categoriaRaw || inferCategoria(descricao);
+        const abs = Math.abs(valorBRLnum || 0);
+        const isNegative = valorBRLnum < 0;
+        const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipoGuess;
+        const valorAdj = isNegative ? -abs : abs;
+        const id = `${banco}${cartaoRaw ? ' '+cartaoRaw:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
+        out.push({
+          id,
+          banco: cartaoRaw ? `${banco} - ${cartaoRaw}` : banco,
+          bancoRaw: banco,
+          cartaoRaw: cartaoRaw,
+          titular,
+          bandeira,
+          tipoCartao,
+          finalCartao,
+          mesReferencia,
+          dataVencimento,
+          dataFechamento,
+          periodoReferencia,
+          valorTotalFatura,
+          data,
+          descricao,
+          estabelecimento: '',
+          local,
+          tipoLancamento,
+          descricaoNormalizada: normalizeDesc(descricao),
+          categoriaTipo: categoriaFinal,
+          divisao: inferDivisaoSugerida(descricao),
+          valorBRL: valorAdj,
+          valorUSD: valorUSDnum,
+          cotacao: cotacao,
+          iof: iof,
+          taxas: taxas,
+          parcelamento: parcelamento,
+          observacoes: ''
+        });
+      }
+      continue; // já processado este objeto fatura
+    }
+
+  // 2) Se existir array de cartoes no novo esquema (cada cartão tem suas transações)
     if (Array.isArray(f.cartoes)) {
       for (const c of f.cartoes) {
         const idfC = c.identificacaoCartao || {};
@@ -364,6 +457,74 @@ function mapJsonToTransactions(json, filename = '') {
         const cartaoLabel = [bandeira || tipoCartao ? `${bandeira} ${tipoCartao}`.trim() : '', finalCartao ? `final ${finalCartao}` : ''].filter(Boolean).join(' ');
         const cartaoRaw = cartaoLabel || finalCartao || '';
         const trans = Array.isArray(c.transacoes) ? c.transacoes : [];
+
+        // 2.a) Formato Colunar Indexado no nível do cartão (conforme seção 3.2)
+        const txCols = c && c.transacoes;
+        const isCardColumnar = txCols && !Array.isArray(txCols) && typeof txCols === 'object' && Array.isArray(txCols.data);
+        if (isCardColumnar) {
+          const n = txCols.data.length;
+          for (let i = 0; i < n; i++) {
+            const dataISO = txCols.data?.[i] || '';
+            const d = dataISO ? new Date(dataISO) : null;
+            const data = d && !isNaN(d) ? fmtDate(d) : '';
+            const descricao = cleanDescricao(txCols.descricao?.[i] || '', banco);
+            const estabelecimento = txCols.estabelecimento?.[i] ?? '';
+            const categoriaRaw = txCols.categoria?.[i] ?? '';
+            const tipoLancamento = txCols.tipoLancamento?.[i] || '';
+            const valorBRLnum = Number(txCols.valorBRL?.[i] ?? 0);
+            const valorUSDraw = txCols.valorUSD?.[i];
+            const valorUSDnum = (valorUSDraw == null || valorUSDraw === '') ? '' : Number(valorUSDraw);
+            const cotacaoRaw = txCols.cotacaoDolar?.[i];
+            const cotacao = (cotacaoRaw == null || cotacaoRaw === '') ? '' : String(cotacaoRaw);
+            const iofRaw = txCols.iof?.[i];
+            const iof = (iofRaw == null || iofRaw === '') ? '' : Number(iofRaw);
+            const taxasRaw = txCols.taxas?.[i];
+            const taxas = (taxasRaw == null || taxasRaw === '') ? '' : String(taxasRaw);
+            const parcelamento = txCols.parcelamento?.[i] || '';
+            const local = txCols.local?.[i] || '';
+            const observacoes = txCols.observacoes?.[i] || '';
+
+            const categoriaTipoGuess = categoriaRaw || inferCategoria(descricao);
+            const abs = Math.abs(valorBRLnum || 0);
+            const isNegative = valorBRLnum < 0;
+            const categoriaFinal = isNegative ? 'Pagamento/Crédito' : categoriaTipoGuess;
+            const valorAdj = isNegative ? -abs : abs;
+            const id = `${banco}${cartaoRaw ? ' '+cartaoRaw:''}|${mesReferencia}|${data}|${descricao}|${valorAdj}`;
+            out.push({
+              id,
+              banco: cartaoRaw ? `${banco} - ${cartaoRaw}` : banco,
+              bancoRaw: banco,
+              cartaoRaw: cartaoRaw,
+              titular: titular,
+              bandeira: bandeira,
+              tipoCartao: tipoCartao,
+              finalCartao: finalCartao,
+              mesReferencia: mesReferencia,
+              dataVencimento,
+              dataFechamento,
+              periodoReferencia,
+              valorTotalFatura,
+              data,
+              descricao,
+              estabelecimento: estabelecimento || '',
+              local,
+              tipoLancamento,
+              descricaoNormalizada: normalizeDesc(descricao),
+              categoriaTipo: categoriaFinal,
+              divisao: inferDivisaoSugerida(descricao),
+              valorBRL: valorAdj,
+              valorUSD: valorUSDnum === '' ? '' : valorUSDnum,
+              cotacao: cotacao,
+              iof: iof,
+              taxas: taxas,
+              parcelamento: parcelamento,
+              observacoes
+            });
+          }
+          continue; // este cartão já foi processado via formato colunar
+        }
+
+        // 2.b) Formato tradicional (lista de objetos de transação)
         for (const t of trans) {
           const dataISO = t.data || '';
           const d = dataISO ? new Date(dataISO) : null;

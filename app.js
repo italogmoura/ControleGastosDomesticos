@@ -752,21 +752,27 @@ function lancamentoMatchesQuery(t, query) {
 }
 
 function recalcSummary() {
-  let totalGeral = 0;
-  let totalExclusivas = 0;
+  let totalTudo = 0;        // soma de todas as despesas (sem pagamentos/estornos)
+  let totalExclusivas = 0;  // exclusivas do usuário
   for (const t of STATE.transacoes) {
     const val = Number(t.valorBRL) || 0;
-  // Ignora pagamentos/créditos nos totais de despesas (respeita reclassificação)
-  if (isPagamento(t)) continue;
+    // Ignora pagamentos/créditos nos totais de despesas (respeita reclassificação)
+    if (isPagamento(t)) continue;
+    totalTudo += val;
     const div = t.divisao.replace(' (sugerido)','');
     if (div === 'Exclusiva') totalExclusivas += val;
-    else totalGeral += val;
   }
+  // Base do casal (a dividir) = tudo - exclusivas do usuário
+  const baseCasal = Math.max(0, totalTudo - totalExclusivas);
+
   const uPerc = Math.max(0, Math.min(100, Number(STATE.split.usuario) || 0));
   const ePerc = 100 - uPerc;
-  const usuario = totalExclusivas + totalGeral * (uPerc / 100);
-  const esposa = totalGeral * (ePerc / 100);
-  document.getElementById('sum-geral').textContent = fmtBRL(totalGeral);
+  const usuario = baseCasal * (uPerc / 100) + totalExclusivas;
+  const esposa = baseCasal * (ePerc / 100);
+
+  const sumTotalEl = document.getElementById('sum-total');
+  if (sumTotalEl) sumTotalEl.textContent = fmtBRL(totalTudo);
+  document.getElementById('sum-geral').textContent = fmtBRL(baseCasal);
   document.getElementById('sum-exclusivas').textContent = fmtBRL(totalExclusivas);
   document.getElementById('sum-usuario').textContent = fmtBRL(usuario);
   document.getElementById('sum-esposa').textContent = fmtBRL(esposa);
@@ -1141,10 +1147,12 @@ function exportXLSX() {
   const userPerc = Math.max(0, Math.min(100, Number(STATE.split?.usuario) || 0));
   const spousePerc = 100 - userPerc;
   const divLimpa = (t) => (t.divisao || '').replace(' (sugerido)','') || 'Geral';
-  const totalGeral = despesas.filter(t => divLimpa(t) !== 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  // Nova regra: base do casal = todas despesas - exclusivas do usuário
+  const totalTudo = despesas.reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
   const totalExclusivas = despesas.filter(t => divLimpa(t) === 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
-  const userShareGeral = totalGeral * (userPerc/100);
-  const spouseShareGeral = totalGeral * (spousePerc/100);
+  const baseCasal = Math.max(0, totalTudo - totalExclusivas);
+  const userShareGeral = baseCasal * (userPerc/100);
+  const spouseShareGeral = baseCasal * (spousePerc/100);
   const userTotalAll = totalExclusivas + userShareGeral;
 
   // Quebra por categoria
@@ -1156,7 +1164,7 @@ function exportXLSX() {
   const catRows = [...catMap.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k, v]);
 
   const resumoAOA = [];
-  resumoAOA.push([`Escopo da exportação: ${scope === 'geral' ? 'Compartilhadas (Geral)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas as despesas (Geral + Exclusivas)'}`]);
+  resumoAOA.push([`Escopo da exportação: ${scope === 'geral' ? 'Compartilhadas (Casal)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas as despesas (Casal + Exclusivas)'}`]);
   resumoAOA.push([`Total de despesas no escopo:`, totalDespesas]);
   if (scope === 'geral') {
     resumoAOA.push([]);
@@ -1168,11 +1176,11 @@ function exportXLSX() {
   } else if (scope === 'todos') {
     resumoAOA.push([]);
     resumoAOA.push(['Totais por divisão']);
-    resumoAOA.push(['Geral (a dividir)', totalGeral]);
-    resumoAOA.push(['Exclusivas (Usuário)', totalExclusivas]);
-    resumoAOA.push(['Usuário (%) sobre Geral', userPerc]);
-    resumoAOA.push(['Usuário total (Exclusivas + % Geral)', userTotalAll]);
-    resumoAOA.push(['Esposa total (% Geral)', spouseShareGeral]);
+  resumoAOA.push(['Casal (a dividir)', baseCasal]);
+  resumoAOA.push(['Exclusivas (Usuário)', totalExclusivas]);
+  resumoAOA.push(['Usuário (%) sobre Casal', userPerc]);
+  resumoAOA.push(['Usuário total (Exclusivas + % Casal)', userTotalAll]);
+  resumoAOA.push(['Esposa total (% Casal)', spouseShareGeral]);
   } else if (scope === 'exclusiva') {
     resumoAOA.push([]);
     resumoAOA.push(['Observação', 'Somente despesas exclusivas do usuário neste arquivo.']);
@@ -1220,14 +1228,14 @@ async function exportResumoPDF() {
 
     // Cálculos do resumo (compatível com exportXLSX)
     const divLimpa = (t) => (t.divisao || '').replace(' (sugerido)','') || 'Geral';
-    const total = despesas.reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
-    const totalGeral = despesas.filter(t => divLimpa(t) !== 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
-    const totalExclusivas = despesas.filter(t => divLimpa(t) === 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  const total = despesas.reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  const totalExclusivas = despesas.filter(t => divLimpa(t) === 'Exclusiva').reduce((a,t)=>a+(Number(t.valorBRL)||0),0);
+  const baseCasal = Math.max(0, total - totalExclusivas);
     const uPerc = Math.max(0, Math.min(100, Number(STATE.split?.usuario) || 0));
     const ePerc = 100 - uPerc;
-    const userShareGeral = totalGeral * (uPerc/100);
-    const spouseShareGeral = totalGeral * (ePerc/100);
-    const userTotalAll = totalExclusivas + userShareGeral;
+  const userShareGeral = baseCasal * (uPerc/100);
+  const spouseShareGeral = baseCasal * (ePerc/100);
+  const userTotalAll = totalExclusivas + userShareGeral;
 
     // Cabeçalho
     doc.setFont('helvetica', 'bold');
@@ -1235,7 +1243,7 @@ async function exportResumoPDF() {
     doc.text('Resumo de Despesas', margin, margin);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
-    const scopeLabel = scope === 'geral' ? 'Compartilhadas (Geral)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas (Geral + Exclusivas)';
+  const scopeLabel = scope === 'geral' ? 'Compartilhadas (Casal)' : scope === 'exclusiva' ? 'Exclusivas do usuário' : 'Todas (Casal + Exclusivas)';
     doc.text(`Escopo: ${scopeLabel} • Exportado em: ${dateStr}`, margin, margin + 18);
 
     // Tabela de resumo (duas colunas)
@@ -1247,11 +1255,11 @@ async function exportResumoPDF() {
       summaryRows.push(['Usuário (R$)', fmtBRL(userShareGeral)]);
       summaryRows.push(['Esposa (R$)', fmtBRL(spouseShareGeral)]);
     } else if (scope === 'todos') {
-      summaryRows.push(['Geral (a dividir)', fmtBRL(totalGeral)]);
+      summaryRows.push(['Casal (a dividir)', fmtBRL(baseCasal)]);
       summaryRows.push(['Exclusivas (Usuário)', fmtBRL(totalExclusivas)]);
-      summaryRows.push(['Usuário (%) sobre Geral', `${uPerc}%`]);
-      summaryRows.push(['Usuário total (Exclusivas + % Geral)', fmtBRL(userTotalAll)]);
-      summaryRows.push(['Esposa total (% Geral)', fmtBRL(spouseShareGeral)]);
+      summaryRows.push(['Usuário (%) sobre Casal', `${uPerc}%`]);
+      summaryRows.push(['Usuário total (Exclusivas + % Casal)', fmtBRL(userTotalAll)]);
+      summaryRows.push(['Esposa total (% Casal)', fmtBRL(spouseShareGeral)]);
     } else if (scope === 'exclusiva') {
       summaryRows.push(['Observação', 'Somente despesas exclusivas do usuário.']);
     }

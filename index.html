@@ -20,7 +20,7 @@
   <button id="btn-review-mode" class="btn">Modo Classificação</button>
         <select id="export-scope" title="Escopo da exportação" style="background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;">
           <option value="todos">Exportar: todos os lançamentos</option>
-          <option value="geral">Exportar: apenas compartilhados (Geral)</option>
+          <option value="geral">Exportar: apenas compartilhados (Casal)</option>
           <option value="exclusiva">Exportar: apenas exclusivos do usuário</option>
         </select>
         <button id="btn-export-csv" class="btn" disabled>Exportar CSV</button>
@@ -111,7 +111,11 @@
       <section class="panel">
         <div class="summary" id="summary">
           <div>
-            <div class="label">Total Geral (a dividir):</div>
+            <div class="label">Total (todos os lançamentos - pagamentos/estornos):</div>
+            <div class="value" id="sum-total">R$ 0,00</div>
+          </div>
+          <div>
+            <div class="label">Casal (Total - Exclusivas):</div>
             <div class="value" id="sum-geral">R$ 0,00</div>
           </div>
           <div>
@@ -119,11 +123,11 @@
             <div class="value" id="sum-exclusivas">R$ 0,00</div>
           </div>
           <div>
-            <div class="label">Usuário (<span id="label-perc-usuario">60</span>% do Geral + Exclusivas):</div>
+            <div class="label">Usuário (<span id="label-perc-usuario">60</span>% do Casal + Exclusivas):</div>
             <div class="value" id="sum-usuario">R$ 0,00</div>
           </div>
           <div>
-            <div class="label">Esposa (<span id="label-perc-esposa">40</span>% do Geral):</div>
+            <div class="label">Esposa (<span id="label-perc-esposa">40</span>% do Casal):</div>
             <div class="value" id="sum-esposa">R$ 0,00</div>
           </div>
         </div>
@@ -351,6 +355,6 @@
   <!-- Apache ECharts para gráficos de insights -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 
-    <script src="./app.js"></script>
+    <script src="./app.js?v=2025-08-11-1"></script>
   </body>
 </html>
